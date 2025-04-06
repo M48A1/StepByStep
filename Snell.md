@@ -1,30 +1,86 @@
 # install tool
 
-## wget
-* apt-get install wget
-## unzip
-* apt-get install unzip
+* wget
+```
+apt-get install wget
+```
+
+* unzip
+```
+apt-get install unzip
+```
+
+* vim  
+```
+apt-get install vim
+```
 
 
 # install 
 
-* wget https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip
+* download
+```
+wget https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip
+```
 
-* other system
+* extract (/usr/local/bin)
+```
+ sudo unzip snell-server-v4.1.1-linux-amd64.zip -d /usr/local/bin
+```
 
-* ~~https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip~~
+* generate configuration 
+```
+sudo snell-server --wizard -c /etc/snell-server.conf
+```
 
-* ~~https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-i386.zip~~
+* system service
+```
+sudo vim /lib/systemd/system/snell.service
+```
 
-* ~~https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-aarch64.zip~~
+* copy >> paste >>esc>:wq >>enter
+```
+[Unit]
+Description=Snell Proxy Service
+After=network.target
 
-* ~~https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-armv7l.zip~~
+[Service]
+Type=simple
+User=nobody
+Group=nogroup
+LimitNOFILE=32768
+ExecStart=/usr/local/bin/snell-server -c /etc/snell-server.conf
 
-* unzip snell-server-v4.1.1-linux-amd64.zip
-* ./snell-server
+[Install]
+WantedBy=multi-user.target
+```
 
-# run 
-* ./snell-server &
+* server reload
+```
+sudo systemctl daemon-reload
+```
 
-# configuration
-* cat ~/snell-server.conf
+* run when system starting
+```
+sudo systemctl enable snell
+```
+
+* start
+```
+sudo systemctl start snell
+```
+
+* stop
+```
+sudo systemctl stop snell
+```
+
+* status
+```
+sudo systemctl status snell
+```
+
+* configuration
+```
+cat /etc/snell-server.conf
+```
