@@ -8,7 +8,7 @@
 
 # install 
 
-* wget https://dl.nssurge.com/snell/snell-server-v4.0.1-linux-amd64.zip
+* wget https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip
 
 * other system
 
