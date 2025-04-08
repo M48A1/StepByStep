@@ -38,7 +38,7 @@ sudo snell-server --wizard -c /etc/snell-server.conf
 sudo vim /lib/systemd/system/snell.service
 ```
 
-* copy >> paste >>esc>:wq >>enter
+* copy >> paste >>esc>:wq >>enter centos7 (Group=noboby)
 ```
 [Unit]
 Description=Snell Proxy Service
