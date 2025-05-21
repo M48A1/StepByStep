@@ -1,7 +1,11 @@
 # sudo nano /etc/ssh/sshd_config
 
+### As Is
+
 * PermitRootLogin prohibit-password
-* PermitRootLogin yes
+
+### To Be
+
 * PermitRootLogin yes
 
 
