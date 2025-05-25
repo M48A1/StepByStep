@@ -25,12 +25,12 @@ wget https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip
 
 * extract (/usr/local/bin)
 ```
- sudo unzip snell-server-v4.1.1-linux-amd64.zip -d /usr/local/bin
+unzip snell-server-v4.1.1-linux-amd64.zip -d /usr/local/bin
 ```
 
 * generate configuration 
 ```
-sudo snell-server --wizard -c /etc/snell-server.conf
+snell-server --wizard -c /etc/snell-server.conf
 ```
 
 * system service
