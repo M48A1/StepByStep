@@ -35,7 +35,7 @@ snell-server --wizard -c /etc/snell-server.conf
 
 * system service
 ```
-sudo vim /lib/systemd/system/snell.service
+ vim /lib/systemd/system/snell.service
 ```
 
 * copy >> paste >>esc>:wq >>enter centos7 (Group=noboby)
@@ -57,27 +57,27 @@ WantedBy=multi-user.target
 
 * server reload
 ```
-sudo systemctl daemon-reload
+systemctl daemon-reload
 ```
 
 * run when system starting
 ```
-sudo systemctl enable snell
+systemctl enable snell
 ```
 
 * start
 ```
-sudo systemctl start snell
+systemctl start snell
 ```
 
 * stop
 ```
-sudo systemctl stop snell
+systemctl stop snell
 ```
 
 * status
 ```
-sudo systemctl status snell
+systemctl status snell
 ```
 
 * configuration
