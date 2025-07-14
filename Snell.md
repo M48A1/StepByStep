@@ -20,12 +20,12 @@ apt-get install vim
 
 * download
 ```
-wget https://dl.nssurge.com/snell/snell-server-v4.1.1-linux-amd64.zip
+wget https://dl.nssurge.com/snell/snell-server-v5.0.0-linux-amd64.zip
 ```
 
 * extract (/usr/local/bin)
 ```
-unzip snell-server-v4.1.1-linux-amd64.zip -d /usr/local/bin
+unzip snell-server-v5.0.0-linux-amd64.zip -d /usr/local/bin
 ```
 
 * generate configuration 
