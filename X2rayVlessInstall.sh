@@ -52,9 +52,14 @@ generate_xray_vless_vision_reality() {
     local realityMldsa65Verify=$8
     
     # 确保目录存在
-    mkdir -p "$(dirname "$configPath")"
+    local configDir=$(dirname "$configPath")
+    if ! mkdir -p "$configDir" 2>/dev/null; then
+        echo -e "${RED}❌ 错误：无法创建目录 $configDir${NC}" >&2
+        return 1
+    fi
     
-    cat <<EOF > "$configPath"
+    # 生成配置文件
+    if ! cat > "$configPath" <<'EOF'
 {
     "log": { "loglevel": "warning" },
     "dns": {
@@ -63,7 +68,7 @@ generate_xray_vless_vision_reality() {
     },
     "inbounds": [{
         "tag": "dokodemo-in-VLESSReality",
-        "port": ${realityPort},
+        "port": PORT_PLACEHOLDER,
         "protocol": "dokodemo-door",
         "settings": {
             "address": "127.0.0.1",
@@ -81,7 +86,7 @@ generate_xray_vless_vision_reality() {
         "port": 45987,
         "protocol": "vless",
         "settings": {
-            "clients": [{ "id": "${UUID}", "flow": "xtls-rprx-vision" }],
+            "clients": [{ "id": "UUID_PLACEHOLDER", "flow": "xtls-rprx-vision" }],
             "decryption": "none"
         },
         "streamSettings": {
@@ -89,15 +94,15 @@ generate_xray_vless_vision_reality() {
             "security": "reality",
             "realitySettings": {
                 "show": false,
-                "target": "${realityServerName}:${realityDomainPort}",
+                "target": "SNI_PLACEHOLDER:443",
                 "xver": 0,
-                "serverNames": ["${realityServerName}"],
-                "privateKey": "${realityPrivateKey}",
-                "publicKey": "${realityPublicKey}",
-                "mldsa65Seed": "${realityMldsa65Seed}",
-                "mldsa65Verify": "${realityMldsa65Verify}",
+                "serverNames": ["SNI_PLACEHOLDER"],
+                "privateKey": "PRIVATEKEY_PLACEHOLDER",
+                "publicKey": "PUBLICKEY_PLACEHOLDER",
+                "mldsa65Seed": "MLDSA65SEED_PLACEHOLDER",
+                "mldsa65Verify": "MLDSA65VERIFY_PLACEHOLDER",
                 "maxTimeDiff": 70000,
-                "shortIds": ["", "${SHORT_ID}"]
+                "shortIds": ["", "SHORTID_PLACEHOLDER"]
             }
         },
         "sniffing": {
@@ -109,6 +114,31 @@ generate_xray_vless_vision_reality() {
     "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
+    then
+        echo -e "${RED}❌ 错误：无法写入配置文件 $configPath${NC}" >&2
+        return 1
+    fi
+    
+    # 替换占位符为实际值
+    sed -i.bak "s|PORT_PLACEHOLDER|${realityPort}|g" "$configPath"
+    sed -i.bak "s|UUID_PLACEHOLDER|${UUID}|g" "$configPath"
+    sed -i.bak "s|SNI_PLACEHOLDER|${realityServerName}|g" "$configPath"
+    sed -i.bak "s|PRIVATEKEY_PLACEHOLDER|${realityPrivateKey}|g" "$configPath"
+    sed -i.bak "s|PUBLICKEY_PLACEHOLDER|${realityPublicKey}|g" "$configPath"
+    sed -i.bak "s|MLDSA65SEED_PLACEHOLDER|${realityMldsa65Seed}|g" "$configPath"
+    sed -i.bak "s|MLDSA65VERIFY_PLACEHOLDER|${realityMldsa65Verify}|g" "$configPath"
+    sed -i.bak "s|SHORTID_PLACEHOLDER|${SHORT_ID}|g" "$configPath"
+    
+    # 删除备份文件
+    rm -f "${configPath}.bak"
+    
+    # 验证文件是否存在
+    if [ ! -f "$configPath" ]; then
+        echo -e "${RED}❌ 错误：配置文件创建后丢失 $configPath${NC}" >&2
+        return 1
+    fi
+    
+    return 0
 }
 
 # 2. Reality 密钥生成 (使用 Xray)
@@ -272,7 +302,7 @@ setup_vless_vision_reality() {
     
     # 4. 生成配置文件
     echo -e "${YELLOW}生成 Xray 配置文件...${NC}"
-    generate_xray_vless_vision_reality \
+    if ! generate_xray_vless_vision_reality \
         "$XRAY_CONFIG" \
         "${PORT}" \
         "${CUSTOM_SNI}" \
@@ -280,21 +310,45 @@ setup_vless_vision_reality() {
         "${PRIVATE_KEY}" \
         "${PUBLIC_KEY}" \
         "${MLDSA65_SEED}" \
-        "${MLDSA65_VERIFY}"
+        "${MLDSA65_VERIFY}"; then
+        echo -e "${RED}❌ 错误：配置文件生成失败${NC}"
+        return 1
+    fi
+    
+    # 验证文件是否真的存在
+    if [ ! -f "$XRAY_CONFIG" ]; then
+        echo -e "${RED}❌ 错误：配置文件验证失败，文件不存在：$XRAY_CONFIG${NC}"
+        return 1
+    fi
     echo -e "${GREEN}✅ 配置文件生成成功${NC}"
     
     # 5. 设置配置文件权限
-    chmod 600 "$XRAY_CONFIG"
+    if ! chmod 600 "$XRAY_CONFIG"; then
+        echo -e "${RED}❌ 错误：无法设置配置文件权限${NC}"
+        echo -e "${YELLOW}调试信息：${NC}"
+        ls -la "$XRAY_CONFIG" || echo "文件不存在"
+        return 1
+    fi
     echo -e "${GREEN}✅ 配置文件权限已设置${NC}"
     
     # 6. 验证配置
     echo -e "${YELLOW}验证配置...${NC}"
+    echo -e "${YELLOW}调试：配置文件路径: $XRAY_CONFIG${NC}"
+    echo -e "${YELLOW}调试：文件存在: $([ -f "$XRAY_CONFIG" ] && echo "是" || echo "否")${NC}"
+    
+    if [ ! -f "$XRAY_CONFIG" ]; then
+        echo -e "${RED}❌ 错误：配置文件不存在！${NC}"
+        echo -e "${YELLOW}目录内容：${NC}"
+        ls -la "$(dirname "$XRAY_CONFIG")" || echo "目录不存在"
+        return 1
+    fi
+    
     if /usr/local/bin/xray -test -config "$XRAY_CONFIG" > /dev/null 2>&1; then
         echo -e "${GREEN}✅ 配置校验通过${NC}"
     else
         echo -e "${RED}❌ 配置校验失败！${NC}"
         echo -e "${YELLOW}详细错误：${NC}"
-        /usr/local/bin/xray -test -config "$XRAY_CONFIG"
+        /usr/local/bin/xray -test -config "$XRAY_CONFIG" || true
         return 1
     fi
     
