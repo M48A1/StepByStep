@@ -11,7 +11,7 @@ echo -e "${BLUE}==================================================${NC}"
 echo -e "${GREEN}      欢迎使用自定义 VLESS-Reality 一键安装脚本    ${NC}"
 echo -e "${BLUE}==================================================${NC}"
 
-# 新增：第一步检查现有配置文件
+# 1. 检查现有配置文件
 XRAY_CONFIG_PATH="/usr/local/etc/xray/config.json"
 
 if [ -f "$XRAY_CONFIG_PATH" ]; then
@@ -73,11 +73,18 @@ SHORT_ID=$(openssl rand -hex 8)
 # 7. 写入 Xray 配置文件 (config.json)
 mkdir -p /usr/local/etc/xray
 
-# 注意：在 outbounds 里的 freedom 协议中加入了 "domainStrategy": "UseIPv4" 确保 VPS 仅使用 IPv4 出站
+# 【核心更新】此处已完美并入 DNS 优化模块，并强制 queryStrategy 为 UseIPv4
 cat <<EOF > /usr/local/etc/xray/config.json
 {
     "log": {
         "loglevel": "warning"
+    },
+    "dns": {
+        "servers": [
+            "1.1.1.1",
+            "1.0.0.1"
+        ],
+        "queryStrategy": "UseIPv4"
     },
     "inbounds": [
         {
@@ -147,7 +154,7 @@ systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
 
-# 强制获取服务器的 IPv4 地址（通过 ipv4.icanhazip.com 避免获取到 IPv6）
+# 强制获取服务器的 IPv4 地址
 SERVER_IP=$(curl -4 -s ipv4.icanhazip.com)
 if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(curl -s ifconfig.me)
