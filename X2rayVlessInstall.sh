@@ -60,14 +60,21 @@ apt-get update -y && apt-get install -y curl jq openssl uuid-runtime ufw iptable
 echo -e "${YELLOW}[2/5] 正在下载并安装官方 Xray-core...${NC}"
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 6. 自动生成 Reality 所需的各种随机密钥
+# 6. 自动生成 Reality 所需的各种随机密钥（修复重点：采用绝对路径与健壮截取）
 echo -e "${YELLOW}[3/5] 正在自动生成高性能安全配置...${NC}"
 UUID=$(uuidgen)
 
-# 生成 Reality 专属的公钥和私钥
-XRAY_KEYS=$(xray x25519)
-PRIVATE_KEY=$(echo "$XRAY_KEYS" | grep "Private key:" | awk '{print $3}')
-PUBLIC_KEY=$(echo "$XRAY_KEYS" | grep "Public key:" | awk '{print $3}')
+# 使用绝对路径调用 xray 生成密钥对
+XRAY_KEYS=$(/usr/local/bin/xray x25519)
+PRIVATE_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Private key/{print $2}' | tr -d ' ')
+PUBLIC_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Public key/{print $2}' | tr -d ' ')
+
+# 健壮性检查：如果依然为空，进行二次兜底尝试
+if [ -z "$PUBLIC_KEY" ]; then
+    XRAY_KEYS=$(xray x25519 2>/dev/null)
+    PRIVATE_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Private key/{print $2}' | tr -d ' ')
+    PUBLIC_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Public key/{print $2}' | tr -d ' ')
+fi
 
 # 生成 8 字节的十六进制随机 ShortID
 SHORT_ID=$(openssl rand -hex 8)
@@ -164,7 +171,7 @@ fi
 # 拼接完整的标准通用一键导入链接
 VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&spx=%2F&type=tcp&flow=xtls-rprx-vision&sni=${CUSTOM_SNI}&sid=${SHORT_ID}#My_Custom_Reality"
 
-# 10. 打印超完整、格式化的节点参数面板（修复版排版）
+# 10. 打印超完整、格式化的节点参数面板
 clear
 echo -e "${PURPLE}==========================================================${NC}"
 echo -e "${GREEN}             🎉 VLESS-Reality 搭建成功！            ${NC}"
