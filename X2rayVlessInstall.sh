@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==================== 版本信息 ====================
-VERSION="1.0.6"
+VERSION="1.0.8"
 BUILD_DATE="2026-07-02"
 
 # 全局错误处理
@@ -185,6 +185,12 @@ generate_reality_key_xray() {
     fi
 }
 
+get_xray_service_user() {
+    local serviceUser
+    serviceUser=$(systemctl cat xray 2>/dev/null | awk -F= '/^[[:space:]]*User=/ {print $2; exit}' | tr -d '[:space:]')
+    echo "${serviceUser:-root}"
+}
+
 # 3. VLESS Vision Reality 客户端配置生成
 generate_vless_reality_client_config() {
     local uuid=$1
@@ -281,11 +287,16 @@ setup_vless_vision_reality() {
         return 1
     fi
 
-    echo -e "${YELLOW}👉 客户端兼容模式 [默认: 1]: ${NC}"
+    echo -e "${YELLOW}👉 客户端兼容模式（必须选择）: ${NC}"
     echo -e "  ${CYAN}1${NC}. Loon/通用兼容模式（不启用 xtls-rprx-vision，握手兼容性更好）"
     echo -e "  ${CYAN}2${NC}. Xray/Vision 模式（启用 xtls-rprx-vision，客户端必须支持）"
-    read -p "请选择 [默认: 1]: " FLOW_CHOICE
-    FLOW_CHOICE=${FLOW_CHOICE:-1}
+    while true; do
+        read -p "请选择 1 或 2: " FLOW_CHOICE
+        case "$FLOW_CHOICE" in
+            1|2) break ;;
+            *) echo -e "${RED}❌ 请输入 1 或 2，不能留空。${NC}" ;;
+        esac
+    done
     if [[ "$FLOW_CHOICE" == "2" ]]; then
         FLOW="xtls-rprx-vision"
     else
@@ -440,19 +451,22 @@ setup_vless_vision_reality() {
     echo -e "${GREEN}✅ 配置文件生成成功${NC}"
     
     # 5. 设置配置文件权限
+    XRAY_USER=$(get_xray_service_user)
     mkdir -p /var/log/xray
     touch /var/log/xray/access.log /var/log/xray/error.log
-    if id nobody >/dev/null 2>&1; then
-        chown -R nobody:nogroup /var/log/xray 2>/dev/null || chown -R nobody:nobody /var/log/xray 2>/dev/null || true
+    if [ "$XRAY_USER" != "root" ] && id "$XRAY_USER" >/dev/null 2>&1; then
+        chown -R "$XRAY_USER":"$XRAY_USER" /var/log/xray 2>/dev/null || chown -R "$XRAY_USER":nogroup /var/log/xray 2>/dev/null || true
+        chown "$XRAY_USER":"$XRAY_USER" "$XRAY_CONFIG" 2>/dev/null || chown "$XRAY_USER":nogroup "$XRAY_CONFIG" 2>/dev/null || true
     fi
     chmod 755 /var/log/xray
-    if ! chmod 600 "$XRAY_CONFIG"; then
+    if ! chmod 640 "$XRAY_CONFIG"; then
         echo -e "${RED}❌ 错误：无法设置配置文件权限${NC}"
         echo -e "${YELLOW}调试信息：${NC}"
         ls -la "$XRAY_CONFIG" || echo "文件不存在"
         return 1
     fi
-    echo -e "${GREEN}✅ 配置文件权限已设置${NC}"
+    chmod 644 /var/log/xray/access.log /var/log/xray/error.log 2>/dev/null || true
+    echo -e "${GREEN}✅ 配置文件权限已设置（Xray 用户: ${XRAY_USER}）${NC}"
     
     # 6. 验证配置
     echo -e "${YELLOW}验证配置...${NC}"
@@ -517,6 +531,15 @@ EOF
     else
         echo -e "${RED}❌ 错误：Xray 服务启动失败！${NC}"
         systemctl status xray
+        return 1
+    fi
+
+    if ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${PORT}$"; then
+        echo -e "${GREEN}✅ 端口监听正常: ${PORT}/tcp${NC}"
+    else
+        echo -e "${RED}❌ 错误：Xray 服务已启动，但未监听 ${PORT}/tcp${NC}"
+        echo -e "${YELLOW}当前监听端口：${NC}"
+        ss -tlnp 2>/dev/null || true
         return 1
     fi
     
@@ -666,11 +689,21 @@ EOF
     
     echo -e "${YELLOW}📌 常用命令${NC}"
     echo -e "  • 查看实时日志      : ${CYAN}journalctl -u xray -f${NC}"
+    echo -e "  • 查看访问日志      : ${CYAN}tail -f /var/log/xray/access.log${NC}"
+    echo -e "  • 查看错误日志      : ${CYAN}tail -f /var/log/xray/error.log${NC}"
     echo -e "  • 查看配置文件      : ${CYAN}cat $XRAY_CONFIG | jq .${NC}"
     echo -e "  • 重启服务          : ${CYAN}systemctl restart xray${NC}"
     echo -e "  • 查看服务状态      : ${CYAN}systemctl status xray${NC}"
+    echo -e "  • 查看监听端口      : ${CYAN}ss -tlnp | grep ':${PORT}'${NC}"
+    echo -e "  • 查看 UFW 状态     : ${CYAN}ufw status verbose${NC}"
     echo -e "  • 验证配置语法      : ${CYAN}/usr/local/bin/xray -test -config $XRAY_CONFIG${NC}"
     echo -e "  • 查看配置备份      : ${CYAN}ls -la ${XRAY_CONFIG}.bak.*${NC}"
+    echo ""
+    echo -e "${YELLOW}🧭 如果 Loon 仍然无法握手${NC}"
+    echo -e "  • 先确认 VPS 商家安全组/防火墙已放行 ${CYAN}${PORT}/tcp${NC}"
+    echo -e "  • Loon 测试时同时观察：${CYAN}tail -f /var/log/xray/access.log /var/log/xray/error.log${NC}"
+    echo -e "  • 如果日志没有任何新增，说明请求没有到达 VPS 的 Xray 端口"
+    echo -e "  • 如果日志有 rejected/invalid user/shortId，说明客户端参数需要逐项核对"
     echo ""
     
     echo -e "${YELLOW}🔐 VLESS-Reality 配置要点${NC}"
