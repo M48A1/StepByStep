@@ -11,7 +11,7 @@ NC='\033[0m'
 
 clear
 echo -e "${BLUE}==================================================${NC}"
-echo -e "${GREEN}   VLESS-Reality Ultimate Final 安全加固版   ${NC}"
+echo -e "${GREEN}   VLESS-Reality Ultimate Final 完美修复版   ${NC}"
 echo -e "${BLUE}==================================================${NC}"
 
 if [ "$EUID" -ne 0 ]; then
@@ -40,29 +40,36 @@ echo -e "${YELLOW}👉 端口 [默认: 443]: ${NC}"
 read -p "" CUSTOM_PORT
 PORT=${CUSTOM_PORT:-443}
 
-# 安装依赖 (加入 uuid-runtime 以防万一)
+# 安装依赖 (加入 uuid-runtime，确保依赖完整)
 echo -e "${YELLOW}正在安装系统依赖...${NC}"
 apt-get update -qq && apt-get install -y curl jq qrencode ufw uuid-runtime
 
 # 安装 Xray 核心
 bash -c "$(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 密钥与标识生成
+# 密钥与标识生成 (【核心修复】彻底解决空密钥导致校验失败的问题)
 echo -e "${YELLOW}生成密钥...${NC}"
 XRAY_KEYS=$(/usr/local/bin/xray x25519)
-PRIVATE_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Private key/{print $2}')
-PUBLIC_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Public key/{print $2}')
+PRIVATE_KEY=$(echo "$XRAY_KEYS" | grep -i "private" | awk -F':' '{print $2}' | sed 's/ //g')
+PUBLIC_KEY=$(echo "$XRAY_KEYS" | grep -i "public" | awk -F':' '{print $2}' | sed 's/ //g')
 
 SHORT_ID=$(openssl rand -hex 8)
 
-# 优先使用 xray 自身生成 UUID，更稳妥
+# 优先使用 xray 自身生成 UUID
 if /usr/local/bin/xray uuid >/dev/null 2>&1; then
     UUID=$(/usr/local/bin/xray uuid)
 else
     UUID=$(uuidgen)
 fi
 
-# 配置
+# 【新增安全校验】若密钥依然提取失败，则中止脚本，防止写入破坏的 json 文件
+if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+    echo -e "${RED}❌ 错误：未能从 Xray 成功提取密钥！原始输出如下：${NC}"
+    echo "$XRAY_KEYS"
+    exit 1
+fi
+
+# 配置写入
 cat > "$XRAY_CONFIG" <<EOF
 {
     "log": { "loglevel": "warning" },
@@ -104,20 +111,20 @@ else
     exit 1
 fi
 
-# 安全配置 UFW 防火墙
+# 安全配置 UFW 防火墙 (防止断开 SSH)
 echo -e "${YELLOW}配置 UFW 防火墙...${NC}"
 if command -v ufw >/dev/null; then
-    # 【核心安全修复】强制先允许当前的 SSH 端口，防止断开连接
+    # 自动探测当前 SSH 端口，强制允许，防止用户被挡在服务器外
     SSH_PORT=$(ss -tlnp | grep sshd | awk '{print $4}' | awk -F':' '{print $2}' | head -n 1)
     SSH_PORT=${SSH_PORT:-22}
     ufw allow "${SSH_PORT}"/tcp > /dev/null 2>&1
     
     ufw allow "${PORT}"/tcp > /dev/null 2>&1
     ufw --force enable
-    echo -e "${GREEN}UFW 已放行当前 SSH 端口(${SSH_PORT}) 及 节点端口(${PORT})${NC}"
+    echo -e "${GREEN}UFW 已自动放行 SSH 端口(${SSH_PORT}) 及 节点端口(${PORT})${NC}"
 fi
 
-# BBR 开启（兼容虚拟化环境）
+# BBR 开启（增强了容器化环境的兼容性）
 echo -e "${YELLOW}配置 BBR 加速...${NC}"
 grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf || {
     cat >> /etc/sysctl.conf <<EOF
@@ -125,9 +132,9 @@ net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
 }
-sysctl -p > /dev/null 2>&1 || echo -e "${YELLOW}提示: 当前系统环境可能不支持直接修改内核 sysctl，已跳过。${NC}"
+sysctl -p > /dev/null 2>&1 || echo -e "${YELLOW}提示: 当前环境无法直接更新内核 sysctl 参数，已优雅跳过 BBR 开启步骤。${NC}"
 
-# 启动
+# 启动服务
 systemctl daemon-reload
 systemctl enable --now xray
 
@@ -137,7 +144,7 @@ SERVER_IP=$(curl -4s -m 5 https://api.ipify.org 2>/dev/null || \
             curl -4s -m 5 https://ifconfig.me 2>/dev/null || \
             hostname -I | awk '{print $1}' 2>/dev/null || echo "IP获取失败")
 
-# URL 编码处理别名（防止中文和空格导致节点链接挂掉）
+# 节点名称 URL 编码处理（防止因中文或空格引发导入解析错误）
 ENCODED_NODE_NAME=$(echo -n "${NODE_NAME}" | jq -sRr @uri)
 
 VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&fp=chrome&type=tcp&sni=${CUSTOM_SNI}&sid=${SHORT_ID}#${ENCODED_NODE_NAME}"
