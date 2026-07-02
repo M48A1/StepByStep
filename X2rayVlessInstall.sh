@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.1"
+VERSION="2.4.2"
 BUILD_DATE="2026-07-02"
 
 set -Eeuo pipefail
@@ -66,7 +66,8 @@ remove_old_config() {
     case "$answer" in
         y|Y)
             rm -f "$XRAY_CONFIG"
-            ok "旧配置已删除。"
+            rm -f "$XRAY_INFO" "$XRAY_QR"
+            ok "旧配置、节点信息和二维码已删除。"
             ;;
         *)
             warn "已取消，旧配置未修改。"
