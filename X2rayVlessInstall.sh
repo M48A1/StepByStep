@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.0"
+VERSION="2.4.1"
 BUILD_DATE="2026-07-02"
 
 set -Eeuo pipefail
@@ -366,16 +366,302 @@ EOF
 
 install_manager_command() {
     local source_path
-    source_path=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
+    source_path=${BASH_SOURCE[0]:-$0}
+    source_path=$(readlink -f "$source_path" 2>/dev/null || printf '%s' "$source_path")
 
-    if [ -f "$source_path" ]; then
+    if [ -f "$source_path" ] && grep -q "VLESS REALITY 一键安装脚本" "$source_path" 2>/dev/null; then
         install -m 755 "$source_path" "$MANAGER_BIN"
         rm -f /usr/local/bin/vless-reality 2>/dev/null || true
         ok "管理命令已安装：vless"
         echo "以后可直接运行：vless"
     else
-        warn "无法定位当前脚本，未安装管理命令。"
+        write_manager_stub
     fi
+}
+
+write_manager_stub() {
+    cat >"$MANAGER_BIN" <<'VLESS_MANAGER_EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+XRAY_BIN="/usr/local/bin/xray"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+XRAY_INFO="/usr/local/etc/xray/vless-reality-info.txt"
+XRAY_QR="/usr/local/etc/xray/vless-reality-qr.png"
+FINGERPRINT="chrome"
+SPIDER_X="/"
+FLOW="xtls-rprx-vision"
+DEFAULT_DNS_1="1.1.1.1"
+DEFAULT_DNS_2="8.8.8.8"
+
+ok() { echo -e "${GREEN}$*${NC}"; }
+warn() { echo -e "${YELLOW}$*${NC}"; }
+die() { echo -e "${RED}$*${NC}" >&2; exit 1; }
+
+require_root() {
+    [ "${EUID}" -eq 0 ] || die "请使用 root 权限运行。"
+}
+
+validate_sni() {
+    local value=$1
+    [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+validate_dns_value() {
+    local value=$1
+    [[ "$value" =~ ^[A-Za-z0-9:._-]+$ ]]
+}
+
+public_key_from_private() {
+    local private_key=$1
+    local key_output
+    key_output=$("$XRAY_BIN" x25519 -i "$private_key")
+    printf '%s\n' "$key_output" | awk -F': ' '
+        /Public key|PublicKey|Password/ { value = $2 }
+        END { gsub(/[[:space:]]/, "", value); print value }
+    '
+}
+
+saved_server_ip() {
+    if [ -f "$XRAY_INFO" ]; then
+        awk -F': ' '/^服务器:/ { print $2; exit }' "$XRAY_INFO"
+    fi
+}
+
+regenerate_client_info_from_config() {
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local uuid port flow email node_name sni short_id private_key public_key server_ip encoded_name link
+    uuid=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].id][0] // empty' "$XRAY_CONFIG")
+    port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    flow=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].flow][0] // empty' "$XRAY_CONFIG")
+    email=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].email][0] // empty' "$XRAY_CONFIG")
+    sni=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$XRAY_CONFIG")
+    short_id=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.shortIds[0]][0] // empty' "$XRAY_CONFIG")
+    private_key=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.privateKey][0] // empty' "$XRAY_CONFIG")
+
+    [ -n "$uuid" ] || die "无法从配置读取 UUID。"
+    [ -n "$port" ] || die "无法从配置读取端口。"
+    [ -n "$flow" ] || flow="$FLOW"
+    [ -n "$sni" ] || die "无法从配置读取 SNI。"
+    [ -n "$short_id" ] || die "无法从配置读取 Short ID。"
+    [ -n "$private_key" ] || die "无法从配置读取 Private Key。"
+
+    public_key=$(public_key_from_private "$private_key")
+    [ -n "$public_key" ] || die "无法从 Private Key 推导 Public Key。"
+
+    node_name=${email%@vless-reality}
+    [ -n "$node_name" ] || node_name="My_VLESS"
+
+    server_ip=$(saved_server_ip)
+    if [ -z "${server_ip:-}" ]; then
+        server_ip=$(curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || \
+            curl -4fsS --max-time 8 https://ipv4.icanhazip.com 2>/dev/null || \
+            hostname -I 2>/dev/null | awk '{print $1}' || true)
+    fi
+    [ -n "${server_ip:-}" ] || read -r -p "请输入服务器公网 IP: " server_ip
+    [ -n "$server_ip" ] || die "服务器 IP 不能为空。"
+
+    encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
+    link="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=${flow}&pbk=${public_key}&fp=${FINGERPRINT}&sni=${sni}&sid=${short_id}&spx=%2F#${encoded_name}"
+
+    cat >"$XRAY_INFO" <<EOF
+节点名称: ${node_name}
+服务器: ${server_ip}
+端口: ${port}
+协议: VLESS
+传输: TCP
+安全: REALITY
+Flow: ${flow}
+UUID: ${uuid}
+SNI: ${sni}
+Public Key: ${public_key}
+Short ID: ${short_id}
+Fingerprint: ${FINGERPRINT}
+SpiderX: ${SPIDER_X}
+
+VLESS 链接:
+${link}
+EOF
+    chmod 600 "$XRAY_INFO"
+
+    if command -v qrencode >/dev/null 2>&1; then
+        qrencode -o "$XRAY_QR" "$link"
+        chmod 600 "$XRAY_QR"
+    fi
+}
+
+show_info() {
+    if [ ! -f "$XRAY_INFO" ]; then
+        warn "未找到节点信息文件，尝试从当前配置重新生成。"
+        regenerate_client_info_from_config
+    fi
+
+    cat "$XRAY_INFO"
+    if [ -f "$XRAY_CONFIG" ]; then
+        echo
+        echo "当前 Xray DNS:"
+        jq -r '.dns.servers // [] | .[]' "$XRAY_CONFIG" 2>/dev/null || true
+    fi
+    echo
+    [ -f "$XRAY_QR" ] && echo "二维码图片：$XRAY_QR"
+}
+
+show_qr() {
+    if [ ! -f "$XRAY_INFO" ]; then
+        regenerate_client_info_from_config
+    fi
+
+    local link
+    link=$(awk '/^VLESS 链接:$/ { getline; print; exit }' "$XRAY_INFO")
+    [ -n "$link" ] || die "无法读取 VLESS 链接。"
+
+    command -v qrencode >/dev/null 2>&1 || die "未安装 qrencode。"
+    qrencode -t UTF8 -m 2 "$link"
+    qrencode -o "$XRAY_QR" "$link"
+    chmod 600 "$XRAY_QR"
+    echo
+    echo "二维码图片已保存到：$XRAY_QR"
+}
+
+change_sni() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local new_sni tmp_config
+    new_sni=${1:-}
+    if [ -z "$new_sni" ]; then
+        read -r -p "请输入新的 SNI 域名: " new_sni
+    fi
+    validate_sni "$new_sni" || die "SNI 格式不正确。"
+
+    tmp_config=$(mktemp)
+    jq --arg sni "$new_sni" '
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target) = ($sni + ":443")
+        | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    mv "$tmp_config" "$XRAY_CONFIG"
+    systemctl restart xray
+    regenerate_client_info_from_config
+    ok "SNI 已更新为：$new_sni"
+    ok "Xray 已重启，客户端信息和二维码已重新生成。"
+}
+
+change_dns() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local dns1 dns2 tmp_config
+    dns1=${1:-}
+    dns2=${2:-}
+    if [ -z "$dns1" ]; then
+        read -r -p "请输入主 DNS [默认: ${DEFAULT_DNS_1}]: " dns1
+        dns1=${dns1:-$DEFAULT_DNS_1}
+    fi
+    if [ -z "$dns2" ]; then
+        read -r -p "请输入备用 DNS [默认: ${DEFAULT_DNS_2}]: " dns2
+        dns2=${dns2:-$DEFAULT_DNS_2}
+    fi
+
+    validate_dns_value "$dns1" || die "主 DNS 格式不正确。"
+    validate_dns_value "$dns2" || die "备用 DNS 格式不正确。"
+
+    tmp_config=$(mktemp)
+    jq --arg dns1 "$dns1" --arg dns2 "$dns2" '
+        .dns = {
+            servers: [$dns1, $dns2],
+            queryStrategy: "UseIPv4"
+        }
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    mv "$tmp_config" "$XRAY_CONFIG"
+    systemctl restart xray
+    ok "DNS 已更新为：$dns1, $dns2"
+    ok "Xray 已重启。"
+}
+
+restart_service() {
+    require_root
+    systemctl restart xray
+    ok "Xray 已重启。"
+}
+
+status_service() {
+    systemctl status xray --no-pager
+}
+
+manager_menu() {
+    while true; do
+        echo
+        echo -e "${BLUE}============== vless 管理菜单 ==============${NC}"
+        echo "1. 查看节点信息"
+        echo "2. 输出二维码"
+        echo "3. 修改 SNI"
+        echo "4. 修改 DNS"
+        echo "5. 重启 Xray"
+        echo "6. 查看 Xray 状态"
+        echo "0. 退出"
+        read -r -p "请选择: " choice
+        case "$choice" in
+            1) show_info ;;
+            2) show_qr ;;
+            3) change_sni ;;
+            4) change_dns ;;
+            5) restart_service ;;
+            6) status_service ;;
+            0) exit 0 ;;
+            *) warn "请输入 0-6。" ;;
+        esac
+    done
+}
+
+usage() {
+    cat <<EOF
+用法:
+  vless                打开管理菜单
+  vless show           查看节点信息
+  vless qr             输出二维码
+  vless sni <domain>   修改 SNI
+  vless dns <主DNS> <备用DNS>
+                         修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
+  vless restart        重启 Xray
+  vless status         查看状态
+EOF
+}
+
+dispatch() {
+    local command_name
+    command_name=${1:-}
+    case "$command_name" in
+        ""|menu) manager_menu ;;
+        show) show_info ;;
+        qr) show_qr ;;
+        sni|change-sni) shift; change_sni "${1:-}" ;;
+        dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
+        restart) restart_service ;;
+        status) status_service ;;
+        help|-h|--help) usage ;;
+        *) usage; exit 1 ;;
+    esac
+}
+
+dispatch "$@"
+VLESS_MANAGER_EOF
+
+    chmod 755 "$MANAGER_BIN"
+    rm -f /usr/local/bin/vless-reality 2>/dev/null || true
+    ok "管理命令已安装：vless"
+    echo "以后可直接运行：vless"
 }
 
 validate_sni() {
