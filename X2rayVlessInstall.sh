@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==================== 版本信息 ====================
-VERSION="1.0.5"
+VERSION="1.0.6"
 BUILD_DATE="2026-07-02"
 
 # 全局错误处理
@@ -106,11 +106,14 @@ generate_xray_vless_vision_reality() {
     # 使用标准的单入站 VLESS + Reality 配置，公网端口直接接收客户端连接。
     local fullConfig=$(jq -n \
         --arg uuid "$UUID" \
+        --arg flow "$FLOW" \
         --argjson port "$realityPort" \
         --argjson realitySettings "$realitySettings" \
         '{
             "log": {
-                "loglevel": "warning"
+                "access": "/var/log/xray/access.log",
+                "error": "/var/log/xray/error.log",
+                "loglevel": "info"
             },
             "dns": {
                 "servers": ["1.1.1.1", "1.0.0.1"],
@@ -124,10 +127,9 @@ generate_xray_vless_vision_reality() {
                     "protocol": "vless",
                     "settings": {
                         "clients": [
-                            {
-                                "id": $uuid,
-                                "flow": "xtls-rprx-vision"
-                            }
+                            ({
+                                "id": $uuid
+                            } + (if $flow == "" then {} else {"flow": $flow} end))
                         ],
                         "decryption": "none",
                         "fallbacks": []
@@ -207,7 +209,11 @@ generate_vless_reality_client_config() {
     
     # VLESS Reality 标准格式 (不包含 over-tls)
     # reality 安全协议应该直接在 security 字段中指定
-    local client_url="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=xtls-rprx-vision&pbk=${public_key}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F#${node_name}"
+    local flow_param=""
+    if [ -n "${FLOW:-}" ]; then
+        flow_param="&flow=${FLOW}"
+    fi
+    local client_url="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality${flow_param}&pbk=${public_key}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F#${node_name}"
     
     # 验证生成的URL
     if [[ ! "$client_url" =~ ^vless:// ]]; then
@@ -274,6 +280,18 @@ setup_vless_vision_reality() {
         echo -e "${RED}❌ 错误：端口必须是 1-65535 的数字${NC}"
         return 1
     fi
+
+    echo -e "${YELLOW}👉 客户端兼容模式 [默认: 1]: ${NC}"
+    echo -e "  ${CYAN}1${NC}. Loon/通用兼容模式（不启用 xtls-rprx-vision，握手兼容性更好）"
+    echo -e "  ${CYAN}2${NC}. Xray/Vision 模式（启用 xtls-rprx-vision，客户端必须支持）"
+    read -p "请选择 [默认: 1]: " FLOW_CHOICE
+    FLOW_CHOICE=${FLOW_CHOICE:-1}
+    if [[ "$FLOW_CHOICE" == "2" ]]; then
+        FLOW="xtls-rprx-vision"
+    else
+        FLOW=""
+    fi
+    echo -e "${GREEN}✅ 已选择模式: $([ -n "$FLOW" ] && echo "Vision (${FLOW})" || echo "Loon/通用兼容模式")${NC}"
     
     echo -e "${YELLOW}👉 选择 SNI 域名 (输入序号或自定义): ${NC}"
     echo "快速选择:"
@@ -392,6 +410,7 @@ setup_vless_vision_reality() {
     echo -e "${YELLOW}════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}  节点名称:  ${NODE_NAME}${NC}"
     echo -e "${CYAN}  监听端口:  ${PORT}${NC}"
+    echo -e "${CYAN}  Flow:      ${FLOW:-'(空，兼容模式)'}${NC}"
     echo -e "${CYAN}  SNI域名:   ${CUSTOM_SNI}${NC}"
     echo -e "${CYAN}  UUID:      ${UUID}${NC}"
     echo -e "${CYAN}  Public Key:${PUBLIC_KEY}${NC}"
@@ -421,6 +440,12 @@ setup_vless_vision_reality() {
     echo -e "${GREEN}✅ 配置文件生成成功${NC}"
     
     # 5. 设置配置文件权限
+    mkdir -p /var/log/xray
+    touch /var/log/xray/access.log /var/log/xray/error.log
+    if id nobody >/dev/null 2>&1; then
+        chown -R nobody:nogroup /var/log/xray 2>/dev/null || chown -R nobody:nobody /var/log/xray 2>/dev/null || true
+    fi
+    chmod 755 /var/log/xray
     if ! chmod 600 "$XRAY_CONFIG"; then
         echo -e "${RED}❌ 错误：无法设置配置文件权限${NC}"
         echo -e "${YELLOW}调试信息：${NC}"
@@ -591,6 +616,22 @@ EOF
     echo -e "${CYAN}${VLESS_LINK}${NC}"
     echo -e "${PURPLE}═══════════════════════════════════════════════════${NC}"
     echo ""
+
+    echo -e "${YELLOW}📱 Loon 手动填写参数${NC}"
+    echo -e "  类型/协议          : ${CYAN}VLESS${NC}"
+    echo -e "  服务器             : ${CYAN}${SERVER_IP}${NC}"
+    echo -e "  端口               : ${CYAN}${PORT}${NC}"
+    echo -e "  UUID               : ${CYAN}${UUID}${NC}"
+    echo -e "  Transport/Network  : ${CYAN}TCP${NC}"
+    echo -e "  TLS/Reality        : ${CYAN}Reality${NC}"
+    echo -e "  SNI/Server Name    : ${CYAN}${CUSTOM_SNI}${NC}"
+    echo -e "  Public Key / pbk   : ${CYAN}${PUBLIC_KEY}${NC}"
+    echo -e "  Short ID / sid     : ${CYAN}${SHORT_ID}${NC}"
+    echo -e "  Fingerprint / fp   : ${CYAN}chrome${NC}"
+    echo -e "  SpiderX / spx      : ${CYAN}/${NC}"
+    echo -e "  Flow               : ${CYAN}${FLOW:-留空}${NC}"
+    echo -e "  UDP                : ${CYAN}建议先关闭；TCP 握手成功后再测试 UDP${NC}"
+    echo ""
     
     # 链接有效性验证
     echo -e "${YELLOW}📊 链接验证${NC}"
@@ -634,7 +675,7 @@ EOF
     
     echo -e "${YELLOW}🔐 VLESS-Reality 配置要点${NC}"
     echo -e "  • security: reality         (安全协议，不需要 over-tls)"
-    echo -e "  • flow: xtls-rprx-vision   (VLESS Vision 流控)"
+    echo -e "  • flow: ${FLOW:-留空}   (Loon/通用兼容模式建议留空)"
     echo -e "  • pbk: ${PUBLIC_KEY}     (客户端必须匹配)"
     echo -e "  • sni: ${CUSTOM_SNI}     (伪装域名，需真实HTTPS)"
     echo -e "  • sid: ${SHORT_ID}              (短ID标识符)"
