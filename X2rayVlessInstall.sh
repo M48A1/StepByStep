@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==================== 版本信息 ====================
-VERSION="1.0.2"
+VERSION="1.0.4"
 BUILD_DATE="2026-07-02"
 
 # 全局错误处理
@@ -33,6 +33,11 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
+if ! command -v apt-get >/dev/null 2>&1; then
+    echo -e "${RED}错误：当前脚本仅支持 Debian/Ubuntu 系统（需要 apt-get）。${NC}"
+    exit 1
+fi
+
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
 
 if [ -f "$XRAY_CONFIG" ]; then
@@ -43,6 +48,9 @@ if [ -f "$XRAY_CONFIG" ]; then
         cp "$XRAY_CONFIG" "$BACKUP_FILE"
         echo -e "${YELLOW}已备份到: $BACKUP_FILE${NC}"
         rm -f "$XRAY_CONFIG"
+    else
+        echo -e "${YELLOW}已保留旧配置，脚本退出。${NC}"
+        exit 0
     fi
 fi
 
@@ -75,7 +83,6 @@ generate_xray_vless_vision_reality() {
         --arg xver "0" \
         --arg serverName "${realityServerName}" \
         --arg privateKey "${realityPrivateKey}" \
-        --arg publicKey "${realityPublicKey}" \
         --arg maxTimeDiff "70000" \
         --arg shortId "${SHORT_ID}" \
         '{
@@ -84,7 +91,6 @@ generate_xray_vless_vision_reality() {
             xver: ($xver | tonumber),
             serverNames: [$serverName],
             privateKey: $privateKey,
-            publicKey: $publicKey,
             maxTimeDiff: ($maxTimeDiff | tonumber),
             shortIds: ["", $shortId]
         }')
@@ -97,7 +103,7 @@ generate_xray_vless_vision_reality() {
             '. + {mldsa65Seed: $seed, mldsa65Verify: $verify}')
     fi
     
-    # 使用 jq 构建完整配置
+    # 使用标准的单入站 VLESS + Reality 配置，公网端口直接接收客户端连接。
     local fullConfig=$(jq -n \
         --arg uuid "$UUID" \
         --argjson port "$realityPort" \
@@ -112,23 +118,9 @@ generate_xray_vless_vision_reality() {
             },
             "inbounds": [
                 {
-                    "tag": "dokodemo-in-VLESSReality",
+                    "tag": "vless-reality",
+                    "listen": "0.0.0.0",
                     "port": $port,
-                    "protocol": "dokodemo-door",
-                    "settings": {
-                        "address": "127.0.0.1",
-                        "port": 45987,
-                        "network": "tcp"
-                    },
-                    "sniffing": {
-                        "enabled": true,
-                        "destOverride": ["tls"],
-                        "routeOnly": true
-                    }
-                },
-                {
-                    "listen": "127.0.0.1",
-                    "port": 45987,
                     "protocol": "vless",
                     "settings": {
                         "clients": [
@@ -137,7 +129,8 @@ generate_xray_vless_vision_reality() {
                                 "flow": "xtls-rprx-vision"
                             }
                         ],
-                        "decryption": "none"
+                        "decryption": "none",
+                        "fallbacks": []
                     },
                     "streamSettings": {
                         "network": "tcp",
@@ -214,7 +207,7 @@ generate_vless_reality_client_config() {
     
     # VLESS Reality 标准格式 (不包含 over-tls)
     # reality 安全协议应该直接在 security 字段中指定
-    local client_url="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=xtls-rprx-vision&pbk=${public_key}&sni=${server_name}&sid=${short_id}#${node_name}"
+    local client_url="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=xtls-rprx-vision&pbk=${public_key}&fp=chrome&sni=${server_name}&sid=${short_id}&spx=%2F#${node_name}"
     
     # 验证生成的URL
     if [[ ! "$client_url" =~ ^vless:// ]]; then
@@ -277,6 +270,10 @@ setup_vless_vision_reality() {
     echo -e "${YELLOW}👉 端口 [默认: 443]: ${NC}"
     read -p "" CUSTOM_PORT
     PORT=${CUSTOM_PORT:-443}
+    if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then
+        echo -e "${RED}❌ 错误：端口必须是 1-65535 的数字${NC}"
+        return 1
+    fi
     
     echo -e "${YELLOW}👉 选择 SNI 域名 (输入序号或自定义): ${NC}"
     echo "快速选择:"
@@ -290,30 +287,32 @@ setup_vless_vision_reality() {
     read -p "请选择 [默认: 1]: " DOMAIN_CHOICE
     DOMAIN_CHOICE=${DOMAIN_CHOICE:-1}
     
-    if [ "$DOMAIN_CHOICE" -eq -1 ]; then
+    if [[ "$DOMAIN_CHOICE" == "-1" ]]; then
         echo -e "${YELLOW}请输入自定义 SNI 域名 [默认: www.sony.com]: ${NC}"
         read -p "" CUSTOM_SNI
         CUSTOM_SNI=${CUSTOM_SNI:-www.sony.com}
-    elif [ "$DOMAIN_CHOICE" -eq 0 ]; then
+    elif [[ "$DOMAIN_CHOICE" == "0" ]]; then
         echo "完整域名列表:"
         for i in "${!RECOMMENDED_DOMAINS[@]}"; do
             echo -e "  ${CYAN}$((i+1))${NC}. ${RECOMMENDED_DOMAINS[$i]}"
         done
         read -p "请选择序号 [默认: 1]: " DOMAIN_CHOICE
         DOMAIN_CHOICE=${DOMAIN_CHOICE:-1}
-        if [ "$DOMAIN_CHOICE" -ge 1 ] && [ "$DOMAIN_CHOICE" -le ${#RECOMMENDED_DOMAINS[@]} ]; then
+        if [[ "$DOMAIN_CHOICE" =~ ^[0-9]+$ ]] && [ "$DOMAIN_CHOICE" -ge 1 ] && [ "$DOMAIN_CHOICE" -le ${#RECOMMENDED_DOMAINS[@]} ]; then
             CUSTOM_SNI=${RECOMMENDED_DOMAINS[$((DOMAIN_CHOICE-1))]}
         else
             CUSTOM_SNI="${RECOMMENDED_DOMAINS[0]}"
         fi
-    elif [ "$DOMAIN_CHOICE" -ge 1 ] && [ "$DOMAIN_CHOICE" -le 5 ]; then
+    elif [[ "$DOMAIN_CHOICE" =~ ^[0-9]+$ ]] && [ "$DOMAIN_CHOICE" -ge 1 ] && [ "$DOMAIN_CHOICE" -le 5 ]; then
         case $DOMAIN_CHOICE in
             1) CUSTOM_SNI="${RECOMMENDED_DOMAINS[0]}" ;;
             2) CUSTOM_SNI="${RECOMMENDED_DOMAINS[1]}" ;;
             3) CUSTOM_SNI="${RECOMMENDED_DOMAINS[2]}" ;;
             4) CUSTOM_SNI="${RECOMMENDED_DOMAINS[21]}" ;;
-            5) CUSTOM_SNI="${RECOMMENDED_DOMAINS[36]}" ;;
+            5) CUSTOM_SNI="${RECOMMENDED_DOMAINS[37]}" ;;
         esac
+    elif [[ "$DOMAIN_CHOICE" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        CUSTOM_SNI="$DOMAIN_CHOICE"
     else
         CUSTOM_SNI="${RECOMMENDED_DOMAINS[0]}"
     fi
@@ -330,8 +329,8 @@ setup_vless_vision_reality() {
     echo ""
     
     # 使用更健壮的方法提取密钥
-    PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep -i "PrivateKey" | tail -1 | awk '{print $NF}' | sed 's/[^A-Za-z0-9_-]//g')
-    PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep -i "PublicKey" | tail -1 | awk '{print $NF}' | sed 's/[^A-Za-z0-9_-]//g')
+    PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep -Ei "PrivateKey|Private key|Private" | tail -1 | awk '{print $NF}' | sed 's/[^A-Za-z0-9_-]//g')
+    PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep -Ei "PublicKey|Public key|Password" | tail -1 | awk '{print $NF}' | sed 's/[^A-Za-z0-9_-]//g')
     
     # 验证密钥格式
     if ! [[ "$PRIVATE_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]]; then
@@ -351,7 +350,7 @@ setup_vless_vision_reality() {
     fi
     
     echo -e "${GREEN}✅ Reality 密钥生成成功${NC}"
-    echo -e "${CYAN}  Private Key: ${PRIVATE_KEY}${NC}"
+    echo -e "${CYAN}  Private Key: 已生成并写入服务端配置（不在屏幕显示）${NC}"
     echo -e "${CYAN}  Public Key:  ${PUBLIC_KEY}${NC}"
     echo ""
     
@@ -454,22 +453,31 @@ setup_vless_vision_reality() {
     # 7. 配置防火墙
     echo -e "${YELLOW}配置 UFW 防火墙...${NC}"
     if command -v ufw >/dev/null; then
-        SSH_PORT=$(ss -tlnp | grep sshd | awk '{print $4}' | awk -F':' '{print $2}' | head -n 1)
+        SSH_PORT=$(ss -tlnp 2>/dev/null | awk '/sshd/ {print $4}' | awk -F':' '{print $NF}' | head -n 1)
         SSH_PORT=${SSH_PORT:-22}
-        ufw allow "${SSH_PORT}"/tcp > /dev/null 2>&1
-        ufw allow "${PORT}"/tcp > /dev/null 2>&1
-        ufw --force enable
-        echo -e "${GREEN}UFW 已自动放行 SSH 端口(${SSH_PORT}) 及 节点端口(${PORT})${NC}"
+        ufw allow "${SSH_PORT}"/tcp > /dev/null 2>&1 || echo -e "${YELLOW}提示: SSH 端口(${SSH_PORT})放行失败，请手动检查 UFW${NC}"
+        ufw allow "${PORT}"/tcp > /dev/null 2>&1 || echo -e "${YELLOW}提示: 节点端口(${PORT})放行失败，请手动检查 UFW${NC}"
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
+            echo -e "${GREEN}UFW 已放行 SSH 端口(${SSH_PORT}) 及 节点端口(${PORT})${NC}"
+        else
+            read -p "UFW 当前未启用，是否启用？可能影响现有连接。(y/n，默认 n): " ENABLE_UFW
+            if [[ "$ENABLE_UFW" == "y" || "$ENABLE_UFW" == "Y" ]]; then
+                ufw --force enable
+                echo -e "${GREEN}UFW 已启用，并放行 SSH 端口(${SSH_PORT}) 及 节点端口(${PORT})${NC}"
+            else
+                echo -e "${YELLOW}已跳过启用 UFW，仅尝试写入放行规则。${NC}"
+            fi
+        fi
     fi
     
     # 8. 配置 BBR
     echo -e "${YELLOW}配置 BBR 加速...${NC}"
-    grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf || {
-        cat >> /etc/sysctl.conf <<EOF
+    grep -q "^net.core.default_qdisc=fq" /etc/sysctl.conf || cat >> /etc/sysctl.conf <<EOF
 net.core.default_qdisc=fq
+EOF
+    grep -q "^net.ipv4.tcp_congestion_control=bbr" /etc/sysctl.conf || cat >> /etc/sysctl.conf <<EOF
 net.ipv4.tcp_congestion_control=bbr
 EOF
-    }
     sysctl -p > /dev/null 2>&1 || echo -e "${YELLOW}提示: 当前环境无法直接更新内核 sysctl 参数${NC}"
     
     # 9. 启动服务
@@ -649,19 +657,22 @@ EOF
 # ==================== 主程序开始 ====================
 # 安装依赖 (加入 uuid-runtime，确保依赖完整)
 echo -e "${YELLOW}正在安装系统依赖...${NC}"
-apt-get update -qq && apt-get install -y curl jq qrencode ufw uuid-runtime
+apt-get update -qq && apt-get install -y curl jq qrencode ufw uuid-runtime openssl iproute2 ca-certificates
 
 # 安装 Xray 核心（带重试机制）
 echo -e "${YELLOW}正在安装 Xray 核心...${NC}"
 XRAY_INSTALL_SCRIPT=$(mktemp)
+XRAY_INSTALL_LOG=$(mktemp)
 INSTALL_RETRIES=3
 INSTALL_COUNT=0
 
 while [ $INSTALL_COUNT -lt $INSTALL_RETRIES ]; do
     if curl -Ls --connect-timeout 10 --max-time 60 https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$XRAY_INSTALL_SCRIPT" 2>/dev/null && [ -s "$XRAY_INSTALL_SCRIPT" ]; then
-        if bash "$XRAY_INSTALL_SCRIPT" @ install >/dev/null 2>&1; then
+        if bash "$XRAY_INSTALL_SCRIPT" @ install >"$XRAY_INSTALL_LOG" 2>&1; then
             break
         fi
+    else
+        echo "下载 Xray 安装脚本失败或文件为空" > "$XRAY_INSTALL_LOG"
     fi
     INSTALL_COUNT=$((INSTALL_COUNT + 1))
     if [ $INSTALL_COUNT -lt $INSTALL_RETRIES ]; then
@@ -675,8 +686,12 @@ rm -f "$XRAY_INSTALL_SCRIPT"
 # 验证安装
 if [ ! -f "/usr/local/bin/xray" ] || [ ! -x "/usr/local/bin/xray" ]; then
     echo -e "${RED}❌ 错误：Xray 核心安装失败！${NC}"
+    echo -e "${YELLOW}最近一次安装日志：${NC}"
+    tail -n 30 "$XRAY_INSTALL_LOG" 2>/dev/null || true
+    rm -f "$XRAY_INSTALL_LOG"
     exit 1
 fi
+rm -f "$XRAY_INSTALL_LOG"
 
 # 验证 Xray 可用性
 if ! /usr/local/bin/xray -version >/dev/null 2>&1; then
