@@ -42,99 +42,71 @@ fi
 
 # 1. Xray - VLESS Vision Reality 配置文件生成
 generate_xray_vless_vision_reality() {
-    local realityPort=$1
-    local realityServerName=$2
-    local realityDomainPort=$3
-    local realityPrivateKey=$4
-    local realityPublicKey=$5
-    local realityMldsa65Seed=$6
-    local realityMldsa65Verify=$7
+    local configPath=$1
+    local realityPort=$2
+    local realityServerName=$3
+    local realityDomainPort=$4
+    local realityPrivateKey=$5
+    local realityPublicKey=$6
+    local realityMldsa65Seed=$7
+    local realityMldsa65Verify=$8
     
-    cat <<EOF >/etc/v2ray-agent/xray/conf/07_VLESS_vision_reality_inbounds.json
+    # 确保目录存在
+    mkdir -p "$(dirname "$configPath")"
+    
+    cat <<EOF > "$configPath"
 {
-  "inbounds": [
-    {
-      "tag": "dokodemo-in-VLESSReality",
-      "port": ${realityPort},
-      "protocol": "dokodemo-door",
-      "settings": {
-        "address": "127.0.0.1",
-        "port": 45987,
-        "network": "tcp"
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "tls"
-        ],
-        "routeOnly": true
-      }
+    "log": { "loglevel": "warning" },
+    "dns": {
+        "servers": ["1.1.1.1", "1.0.0.1"],
+        "queryStrategy": "UseIPv4"
+    },
+    "inbounds": [{
+        "tag": "dokodemo-in-VLESSReality",
+        "port": ${realityPort},
+        "protocol": "dokodemo-door",
+        "settings": {
+            "address": "127.0.0.1",
+            "port": 45987,
+            "network": "tcp"
+        },
+        "sniffing": {
+            "enabled": true,
+            "destOverride": ["tls"],
+            "routeOnly": true
+        }
     },
     {
-      "listen": "127.0.0.1",
-      "port": 45987,
-      "protocol": "vless",
-      "settings": {
-        "clients": [
-          {
-            "id": "${UUID}",
-            "flow": "xtls-rprx-vision"
-          }
-        ],
-        "decryption": "none",
-        "fallbacks": []
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "show": false,
-          "target": "${realityServerName}:${realityDomainPort}",
-          "xver": 0,
-          "serverNames": [
-            "${realityServerName}"
-          ],
-          "privateKey": "${realityPrivateKey}",
-          "publicKey": "${realityPublicKey}",
-          "mldsa65Seed": "${realityMldsa65Seed}",
-          "mldsa65Verify": "${realityMldsa65Verify}",
-          "maxTimeDiff": 70000,
-          "shortIds": [
-            "",
-            "${SHORT_ID}"
-          ]
+        "listen": "127.0.0.1",
+        "port": 45987,
+        "protocol": "vless",
+        "settings": {
+            "clients": [{ "id": "${UUID}", "flow": "xtls-rprx-vision" }],
+            "decryption": "none"
+        },
+        "streamSettings": {
+            "network": "tcp",
+            "security": "reality",
+            "realitySettings": {
+                "show": false,
+                "target": "${realityServerName}:${realityDomainPort}",
+                "xver": 0,
+                "serverNames": ["${realityServerName}"],
+                "privateKey": "${realityPrivateKey}",
+                "publicKey": "${realityPublicKey}",
+                "mldsa65Seed": "${realityMldsa65Seed}",
+                "mldsa65Verify": "${realityMldsa65Verify}",
+                "maxTimeDiff": 70000,
+                "shortIds": ["", "${SHORT_ID}"]
+            }
+        },
+        "sniffing": {
+            "enabled": true,
+            "destOverride": ["http", "tls", "quic"],
+            "routeOnly": true
         }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ],
-        "routeOnly": true
-      }
-    }
-  ],
-  "routing": {
-    "rules": [
-      {
-        "inboundTag": [
-          "dokodemo-in"
-        ],
-        "domain": [
-          "${realityServerName}"
-        ],
-        "outboundTag": "z_direct_outbound"
-      },
-      {
-        "inboundTag": [
-          "dokodemo-in"
-        ],
-        "outboundTag": "blackhole_out"
-      }
-    ]
-  }
+    }],
+    "outbounds": [{ "protocol": "freedom" }]
 }
 EOF
 }
@@ -301,6 +273,7 @@ setup_vless_vision_reality() {
     # 4. 生成配置文件
     echo -e "${YELLOW}生成 Xray 配置文件...${NC}"
     generate_xray_vless_vision_reality \
+        "$XRAY_CONFIG" \
         "${PORT}" \
         "${CUSTOM_SNI}" \
         "443" \
