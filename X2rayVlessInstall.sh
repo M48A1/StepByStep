@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==================== 版本信息 ====================
-VERSION="1.0.0"
+VERSION="1.0.1"
 BUILD_DATE="2026-07-02"
 
 # 全局错误处理
@@ -306,21 +306,35 @@ setup_vless_vision_reality() {
     REALITY_KEYS=$(generate_reality_key_xray "")
     
     # 调试输出
-    echo -e "${YELLOW}调试：Xray x25519 输出：${NC}"
+    echo -e "${YELLOW}调试：Xray x25519 完整输出：${NC}"
     echo "$REALITY_KEYS"
+    echo ""
     
-    PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $2}')
-    PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $2}')
+    # 使用更健壮的方法提取密钥
+    PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep -i "PrivateKey" | tail -1 | awk '{print $NF}' | sed 's/[^A-Za-z0-9_-]//g')
+    PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep -i "PublicKey" | tail -1 | awk '{print $NF}' | sed 's/[^A-Za-z0-9_-]//g')
     
-    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
-        echo -e "${RED}❌ 错误：未能生成 Reality 密钥${NC}"
-        echo -e "${YELLOW}完整输出：${NC}"
+    # 验证密钥格式
+    if ! [[ "$PRIVATE_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]]; then
+        echo -e "${RED}❌ 错误：Private Key 格式无效或未正确提取${NC}"
+        echo -e "${YELLOW}  提取到的值: '${PRIVATE_KEY}'${NC}"
+        echo -e "${YELLOW}  完整输出：${NC}"
         echo "$REALITY_KEYS"
         return 1
     fi
+    
+    if ! [[ "$PUBLIC_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]]; then
+        echo -e "${RED}❌ 错误：Public Key 格式无效或未正确提取${NC}"
+        echo -e "${YELLOW}  提取到的值: '${PUBLIC_KEY}'${NC}"
+        echo -e "${YELLOW}  完整输出：${NC}"
+        echo "$REALITY_KEYS"
+        return 1
+    fi
+    
     echo -e "${GREEN}✅ Reality 密钥生成成功${NC}"
-    echo -e "${YELLOW}  Private Key: ${PRIVATE_KEY}${NC}"
-    echo -e "${YELLOW}  Public Key: ${PUBLIC_KEY}${NC}"
+    echo -e "${CYAN}  Private Key: ${PRIVATE_KEY}${NC}"
+    echo -e "${CYAN}  Public Key:  ${PUBLIC_KEY}${NC}"
+    echo ""
     
     # 2. 生成 mldsa65 密钥 (可选)
     echo -e "${YELLOW}检查目标域名是否支持 ML-DSA-65...${NC}"
@@ -334,9 +348,39 @@ setup_vless_vision_reality() {
     echo -e "${YELLOW}生成 UUID 和 Short ID...${NC}"
     UUID=$(/usr/local/bin/xray uuid)
     SHORT_ID=$(openssl rand -hex 8)
+    
+    # 验证 UUID 格式
+    if ! [[ "$UUID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        echo -e "${RED}❌ 错误：UUID 格式无效${NC}"
+        echo -e "${YELLOW}  生成的值: ${UUID}${NC}"
+        return 1
+    fi
+    
+    # 验证 Short ID 格式（应该是16字符的16进制）
+    if ! [[ "$SHORT_ID" =~ ^[0-9a-f]{16}$ ]]; then
+        echo -e "${RED}❌ 错误：Short ID 格式无效${NC}"
+        echo -e "${YELLOW}  生成的值: ${SHORT_ID}${NC}"
+        return 1
+    fi
+    
     echo -e "${GREEN}✅ UUID 和 Short ID 生成成功${NC}"
+    echo -e "${CYAN}  UUID:     ${UUID}${NC}"
+    echo -e "${CYAN}  Short ID: ${SHORT_ID}${NC}"
+    echo ""
     
     # 4. 生成配置文件
+    echo -e "${YELLOW}════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}参数验证总结${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}  节点名称:  ${NODE_NAME}${NC}"
+    echo -e "${CYAN}  监听端口:  ${PORT}${NC}"
+    echo -e "${CYAN}  SNI域名:   ${CUSTOM_SNI}${NC}"
+    echo -e "${CYAN}  UUID:      ${UUID}${NC}"
+    echo -e "${CYAN}  Public Key:${PUBLIC_KEY}${NC}"
+    echo -e "${CYAN}  Short ID:  ${SHORT_ID}${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════${NC}"
+    echo ""
+    
     echo -e "${YELLOW}生成 Xray 配置文件...${NC}"
     if ! generate_xray_vless_vision_reality \
         "$XRAY_CONFIG" \
@@ -425,13 +469,35 @@ EOF
     fi
     
     # 11. 获取服务器 IP
+    echo -e "${YELLOW}获取服务器公网IP...${NC}"
     SERVER_IP=$(curl -4s -m 5 https://api.ipify.org 2>/dev/null || \
                 curl -4s -m 5 https://ipv4.icanhazip.com 2>/dev/null || \
                 curl -4s -m 5 https://ifconfig.me 2>/dev/null || \
-                hostname -I | awk '{print $1}' 2>/dev/null || echo "IP获取失败")
+                hostname -I | awk '{print $1}' 2>/dev/null || echo "")
+    
+    if [ -z "$SERVER_IP" ] || [ "$SERVER_IP" = "IP获取失败" ]; then
+        echo -e "${YELLOW}⚠️ 无法获取公网IP，请手动输入${NC}"
+        read -p "请输入服务器公网 IP: " SERVER_IP
+        if [ -z "$SERVER_IP" ]; then
+            echo -e "${RED}❌ 错误：必须提供服务器 IP${NC}"
+            return 1
+        fi
+    fi
+    echo -e "${GREEN}✅ 服务器IP: ${SERVER_IP}${NC}"
     
     # 12. 生成客户端配置
     echo -e "${YELLOW}生成客户端配置...${NC}"
+    
+    # 参数验证
+    if [ -z "$UUID" ] || [ -z "$PUBLIC_KEY" ] || [ -z "$SHORT_ID" ] || [ -z "$CUSTOM_SNI" ]; then
+        echo -e "${RED}❌ 错误：客户端配置参数不完整${NC}"
+        echo -e "${YELLOW}  UUID: ${UUID:-'(空)'}${NC}"
+        echo -e "${YELLOW}  Public Key: ${PUBLIC_KEY:-'(空)'}${NC}"
+        echo -e "${YELLOW}  Short ID: ${SHORT_ID:-'(空)'}${NC}"
+        echo -e "${YELLOW}  SNI: ${CUSTOM_SNI:-'(空)'}${NC}"
+        return 1
+    fi
+    
     ENCODED_NODE_NAME=$(echo -n "${NODE_NAME}" | jq -sRr @uri)
     VLESS_LINK=$(generate_vless_reality_client_config \
         "${UUID}" \
@@ -442,58 +508,77 @@ EOF
         "${SHORT_ID}" \
         "${ENCODED_NODE_NAME}")
     
+    # 验证生成的链接
+    if [[ ! "$VLESS_LINK" =~ ^vless:// ]]; then
+        echo -e "${RED}❌ 错误：客户端配置链接生成失败${NC}"
+        echo -e "${YELLOW}生成的链接: ${VLESS_LINK}${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✅ 客户端配置链接生成成功${NC}"
+    
     # 13. 输出结果
     clear
-    echo -e "${PURPLE}==========================================================${NC}"
-    echo -e "${GREEN}             🎉 安装完成！${NC}"
-    echo -e "${PURPLE}==========================================================${NC}"
+    echo -e "${PURPLE}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}          🎉 安装完成！VLESS-Reality 节点就绪${NC}"
+    echo -e "${PURPLE}════════════════════════════════════════════════════${NC}"
+    echo ""
     
-    echo -e "${YELLOW}📋 关键参数说明：${NC}"
-    echo -e "  • 节点名称: ${NODE_NAME}"
-    echo -e "  • Target Domain: ${CUSTOM_SNI}"
-    echo -e "  • 端口: ${PORT}"
-    echo -e "  • UUID: ${UUID}"
-    echo -e "  • Private Key: ${PRIVATE_KEY}"
-    echo -e "  • Public Key: ${PUBLIC_KEY}"
-    echo -e "  • Short ID: ${SHORT_ID}"
-    if [ -n "$MLDSA65_SEED" ]; then
-        echo -e "  • ML-DSA-65 Seed: ${MLDSA65_SEED}"
-    else
-        echo -e "  • ML-DSA-65: ${YELLOW}不支持或未启用${NC}"
-    fi
+    echo -e "${YELLOW}📋 节点信息总览${NC}"
+    echo -e "${CYAN}┌────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}│ 节点名称        : ${NODE_NAME}${NC}"
+    echo -e "${CYAN}│ 服务器地址      : ${SERVER_IP}:${PORT}${NC}"
+    echo -e "${CYAN}│ 伪装域名 (SNI)  : ${CUSTOM_SNI}${NC}"
+    echo -e "${CYAN}│ UUID            : ${UUID}${NC}"
+    echo -e "${CYAN}│ 公钥 (pbk)      : ${PUBLIC_KEY}${NC}"
+    echo -e "${CYAN}│ Short ID        : ${SHORT_ID}${NC}"
+    echo -e "${CYAN}└────────────────────────────────────────────┘${NC}"
+    echo ""
     
-    echo -e "\n${YELLOW}📝 客户端导入链接：${NC}"
-    echo -e "${CYAN}${VLESS_LINK}${NC}\n"
+    echo -e "${YELLOW}📝 客户端导入链接${NC}"
+    echo -e "${PURPLE}═══════════════════════════════════════════════════${NC}"
+    echo -e "${CYAN}${VLESS_LINK}${NC}"
+    echo -e "${PURPLE}═══════════════════════════════════════════════════${NC}"
+    echo ""
     
     # 生成二维码
     if command -v qrencode >/dev/null; then
+        echo -e "${YELLOW}📱 二维码${NC}"
         qrencode -t UTF8 -m 2 "${VLESS_LINK}"
+        echo ""
     else
         echo -e "${YELLOW}⚠️ qrencode 未安装，跳过二维码生成${NC}"
+        echo ""
     fi
     
-    echo -e "\n${YELLOW}📌 常用命令：${NC}"
-    echo -e "  • 查看日志: journalctl -u xray -f"
-    echo -e "  • 配置文件: $XRAY_CONFIG"
-    echo -e "  • 配置备份: ${XRAY_CONFIG}.bak.*"
-    echo -e "  • 重启服务: systemctl restart xray"
-    echo -e "  • 测试配置: /usr/local/bin/xray -test -config $XRAY_CONFIG"
+    echo -e "${YELLOW}📌 常用命令${NC}"
+    echo -e "  • 查看实时日志      : ${CYAN}journalctl -u xray -f${NC}"
+    echo -e "  • 查看配置文件      : ${CYAN}cat $XRAY_CONFIG | jq .${NC}"
+    echo -e "  • 重启服务          : ${CYAN}systemctl restart xray${NC}"
+    echo -e "  • 查看服务状态      : ${CYAN}systemctl status xray${NC}"
+    echo -e "  • 验证配置语法      : ${CYAN}/usr/local/bin/xray -test -config $XRAY_CONFIG${NC}"
+    echo -e "  • 查看配置备份      : ${CYAN}ls -la ${XRAY_CONFIG}.bak.*${NC}"
+    echo ""
     
-    echo -e "\n${YELLOW}🔐 VLESS Reality 配置详解：${NC}"
-    echo -e "  • target: 伪装的目标域名，需支持 HTTPS"
-    echo -e "  • serverNames: 客户端使用的 SNI 值"
-    echo -e "  • privateKey: 服务端私钥（必须保密）"
-    echo -e "  • publicKey: 客户端使用的公钥"
-    echo -e "  • mldsa65: 后量子密码学支持（支持则启用）"
-    echo -e "  • shortIds: 短标识符，增加混淆程度"
-    echo -e "  • flow: xtls-rprx-vision (VLESS Vision 流控)"
+    echo -e "${YELLOW}🔐 VLESS-Reality 配置要点${NC}"
+    echo -e "  • security: reality         (安全协议，不需要 over-tls)"
+    echo -e "  • flow: xtls-rprx-vision   (VLESS Vision 流控)"
+    echo -e "  • pbk: ${PUBLIC_KEY}     (客户端必须匹配)"
+    echo -e "  • sni: ${CUSTOM_SNI}     (伪装域名，需真实HTTPS)"
+    echo -e "  • sid: ${SHORT_ID}              (短ID标识符)"
+    echo ""
     
-    echo -e "\n${PURPLE}==========================================================${NC}"
-    echo -e "${GREEN}✨ 相关资源：${NC}"
-    echo -e "  • Xray 官方: https://xtls.github.io/"
-    echo -e "  • Reality 文档: https://github.com/XTLS/Xray-core"
-    echo -e "  • 社区讨论: https://github.com/XTLS"
-    echo -e "${PURPLE}==========================================================${NC}"
+    echo -e "${YELLOW}🚀 客户端配置方式${NC}"
+    echo -e "  1. 复制上面的链接，粘贴到支持VLESS的客户端"
+    echo -e "  2. 或使用二维码扫描导入"
+    echo -e "  3. 支持客户端: Clash, v2rayN, SingBox 等"
+    echo ""
+    
+    echo -e "${PURPLE}════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}✨ 更多资源${NC}"
+    echo -e "  • Xray 官方文档     : https://xtls.github.io/"
+    echo -e "  • Reality 说明      : https://github.com/XTLS/Xray-core"
+    echo -e "  • GitHub 讨论区     : https://github.com/XTLS/Xray-core/discussions"
+    echo -e "${PURPLE}════════════════════════════════════════════════════${NC}"
 }
 
 # ==================== 主程序开始 ====================
