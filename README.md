@@ -1,3 +1,3 @@
 # X2rayVlessInstall
-bash <(curl -Ls 你的GitHub_Raw网址)
+bash <(curl -Ls https://raw.githubusercontent.com/M48A1/StepByStep/refs/heads/main/X2rayVlessInstall.sh)
 
