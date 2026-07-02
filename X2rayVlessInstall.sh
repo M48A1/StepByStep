@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# 全局错误处理
+set -e
+trap 'echo -e "${RED}❌ 脚本执行失败，已停止${NC}" >&2' ERR
+
 # ==================== 颜色定义 ====================
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -24,7 +28,12 @@ XRAY_CONFIG="/usr/local/etc/xray/config.json"
 if [ -f "$XRAY_CONFIG" ]; then
     echo -e "${RED}⚠️ 检测到旧配置${NC}"
     read -p "是否删除旧配置继续？(y/n，默认 y): " REMOVE_OLD
-    [[ "$REMOVE_OLD" != "n" && "$REMOVE_OLD" != "N" ]] && rm -f "$XRAY_CONFIG"
+    if [[ "$REMOVE_OLD" != "n" && "$REMOVE_OLD" != "N" ]]; then
+        BACKUP_FILE="${XRAY_CONFIG}.bak.$(date +%s)"
+        cp "$XRAY_CONFIG" "$BACKUP_FILE"
+        echo -e "${YELLOW}已备份到: $BACKUP_FILE${NC}"
+        rm -f "$XRAY_CONFIG"
+    fi
 fi
 
 # 用户输入
@@ -44,8 +53,41 @@ PORT=${CUSTOM_PORT:-443}
 echo -e "${YELLOW}正在安装系统依赖...${NC}"
 apt-get update -qq && apt-get install -y curl jq qrencode ufw uuid-runtime
 
-# 安装 Xray 核心
-bash -c "$(curl -Ls https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+# 安装 Xray 核心（带重试机制）
+echo -e "${YELLOW}正在安装 Xray 核心...${NC}"
+XRAY_INSTALL_SCRIPT=$(mktemp)
+INSTALL_RETRIES=3
+INSTALL_COUNT=0
+
+while [ $INSTALL_COUNT -lt $INSTALL_RETRIES ]; do
+    if curl -Ls --connect-timeout 10 --max-time 60 https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$XRAY_INSTALL_SCRIPT" 2>/dev/null && [ -s "$XRAY_INSTALL_SCRIPT" ]; then
+        if bash "$XRAY_INSTALL_SCRIPT" @ install >/dev/null 2>&1; then
+            break
+        fi
+    fi
+    INSTALL_COUNT=$((INSTALL_COUNT + 1))
+    if [ $INSTALL_COUNT -lt $INSTALL_RETRIES ]; then
+        echo -e "${YELLOW}⚠️ 安装失败，5秒后重试 ($INSTALL_COUNT/$INSTALL_RETRIES)...${NC}"
+        sleep 5
+    fi
+done
+
+rm -f "$XRAY_INSTALL_SCRIPT"
+
+# 验证安装
+if [ ! -f "/usr/local/bin/xray" ] || [ ! -x "/usr/local/bin/xray" ]; then
+    echo -e "${RED}❌ 错误：Xray 核心安装失败！${NC}"
+    exit 1
+fi
+
+# 验证 Xray 可用性
+if ! /usr/local/bin/xray -version >/dev/null 2>&1; then
+    echo -e "${RED}❌ 错误：Xray 核心不可用！${NC}"
+    exit 1
+fi
+
+XRAY_VERSION=$(/usr/local/bin/xray -version 2>/dev/null | head -n 1)
+echo -e "${GREEN}✅ Xray 核心安装成功：$XRAY_VERSION${NC}"
 
 # 密钥与标识生成 (【核心修复】彻底解决空密钥导致校验失败的问题)
 echo -e "${YELLOW}生成密钥...${NC}"
@@ -100,6 +142,10 @@ cat > "$XRAY_CONFIG" <<EOF
 }
 EOF
 
+# 设置配置文件权限
+chmod 600 "$XRAY_CONFIG"
+echo -e "${GREEN}✅ 配置文件权限已设置${NC}"
+
 # 校验
 echo -e "${YELLOW}校验配置...${NC}"
 if /usr/local/bin/xray -test -config "$XRAY_CONFIG" > /dev/null 2>&1; then
@@ -135,8 +181,19 @@ EOF
 sysctl -p > /dev/null 2>&1 || echo -e "${YELLOW}提示: 当前环境无法直接更新内核 sysctl 参数，已优雅跳过 BBR 开启步骤。${NC}"
 
 # 启动服务
+echo -e "${YELLOW}启动 Xray 服务...${NC}"
 systemctl daemon-reload
 systemctl enable --now xray
+
+# 验证服务状态
+sleep 2
+if systemctl is-active --quiet xray; then
+    echo -e "${GREEN}✅ Xray 服务已成功启动${NC}"
+else
+    echo -e "${RED}❌ 错误：Xray 服务启动失败！${NC}"
+    systemctl status xray
+    exit 1
+fi
 
 # IP 获取
 SERVER_IP=$(curl -4s -m 5 https://api.ipify.org 2>/dev/null || \
@@ -162,8 +219,18 @@ echo -e "短ID: ${SHORT_ID}"
 echo -e "\n${GREEN}Loon / 通用 导入链接：${NC}"
 echo -e "${CYAN}${VLESS_LINK}${NC}\n"
 
-qrencode -t UTF8 -m 2 "${VLESS_LINK}"
+# 生成二维码
+if command -v qrencode >/dev/null; then
+    qrencode -t UTF8 -m 2 "${VLESS_LINK}"
+else
+    echo -e "${YELLOW}⚠️ qrencode 未安装，跳过二维码生成${NC}"
+fi
 
 echo -e "${PURPLE}==========================================================${NC}"
-echo -e "${GREEN}✅ 最终版完成${NC}"
+echo -e "${GREEN}✅ 安装完成！节点已运行${NC}"
+echo -e "${PURPLE}==========================================================${NC}"
+echo -e "${YELLOW}备注：${NC}"
+echo -e "- 日志查看: journalctl -u xray -f"
+echo -e "- 配置位置: $XRAY_CONFIG"
+echo -e "- 配置备份: ${XRAY_CONFIG}.bak.*"
 echo -e "${PURPLE}==========================================================${NC}"
