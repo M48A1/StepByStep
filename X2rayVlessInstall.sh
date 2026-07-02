@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.0.3"
+VERSION="2.1.0"
 BUILD_DATE="2026-07-02"
 
 set -Eeuo pipefail
@@ -17,6 +17,7 @@ XRAY_CONFIG="/usr/local/etc/xray/config.json"
 XRAY_META="/usr/local/etc/xray/reality-client.txt"
 XRAY_LOG_DIR="/var/log/xray"
 FLOW="xtls-rprx-vision"
+REALITY_INNER_PORT="45987"
 INSTALL_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
 trap 'echo -e "${RED}错误：第 ${LINENO} 行执行失败：${BASH_COMMAND}${NC}" >&2' ERR
@@ -185,9 +186,25 @@ write_xray_config() {
             },
             inbounds: [
                 {
-                    tag: "vless-reality-vision",
+                    tag: "dokodemo-in-VLESSReality",
                     listen: "0.0.0.0",
                     port: $port,
+                    protocol: "dokodemo-door",
+                    settings: {
+                        address: "127.0.0.1",
+                        port: 45987,
+                        network: "tcp"
+                    },
+                    sniffing: {
+                        enabled: true,
+                        destOverride: ["tls"],
+                        routeOnly: true
+                    }
+                },
+                {
+                    tag: "vless-reality-vision",
+                    listen: "127.0.0.1",
+                    port: 45987,
                     protocol: "vless",
                     settings: {
                         clients: [
@@ -221,14 +238,33 @@ write_xray_config() {
             ],
             outbounds: [
                 {
-                    tag: "direct",
+                    tag: "z_direct_outbound",
                     protocol: "freedom"
                 },
                 {
-                    tag: "block",
+                    tag: "blackhole_out",
                     protocol: "blackhole"
                 }
-            ]
+            ],
+            routing: {
+                rules: [
+                    {
+                        inboundTag: ["dokodemo-in-VLESSReality"],
+                        outboundTag: "z_direct_outbound"
+                    }
+                ]
+            },
+            policy: {
+                levels: {
+                    "0": {
+                        handshake: 4,
+                        connIdle: 300,
+                        uplinkOnly: 2,
+                        downlinkOnly: 5
+                    }
+                }
+            },
+            stats: {}
         }' >"$XRAY_CONFIG"
 
     local xray_user
