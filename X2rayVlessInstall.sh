@@ -5,6 +5,8 @@ GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 echo -e "${BLUE}==================================================${NC}"
@@ -50,9 +52,9 @@ echo -e "${GREEN}已选择伪装域名: ${CUSTOM_SNI}${NC}"
 echo -e "${GREEN}已选择运行端口: ${PORT}${NC}"
 echo -e "${BLUE}--------------------------------------------------${NC}"
 
-# 4. 基础环境检查与安装依赖
-echo -e "${YELLOW}[1/5] 正在安装系统依赖环境...${NC}"
-apt-get update -y && apt-get install -y curl jq openssl uuid-runtime ufw iptables
+# 4. 基础环境检查与安装依赖 (并在此处加入了 qrencode 二维码组件的安装)
+echo -e "${YELLOW}[1/5] 正在安装系统依赖环境及二维码组件...${NC}"
+apt-get update -y && apt-get install -y curl jq openssl uuid-runtime ufw iptables qrencode
 
 # 5. 调用官方脚本安装最新的 Xray-core
 echo -e "${YELLOW}[2/5] 正在下载并安装官方 Xray-core...${NC}"
@@ -73,7 +75,6 @@ SHORT_ID=$(openssl rand -hex 8)
 # 7. 写入 Xray 配置文件 (config.json)
 mkdir -p /usr/local/etc/xray
 
-# 【核心更新】此处已完美并入 DNS 优化模块，并强制 queryStrategy 为 UseIPv4
 cat <<EOF > /usr/local/etc/xray/config.json
 {
     "log": {
@@ -81,8 +82,8 @@ cat <<EOF > /usr/local/etc/xray/config.json
     },
     "dns": {
         "servers": [
-            "1.1.1.1",
-            "1.0.0.1"
+            "8.8.8.8",
+            "1.1.1.1"
         ],
         "queryStrategy": "UseIPv4"
     },
@@ -160,18 +161,39 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(curl -s ifconfig.me)
 fi
 
-# 10. 打印精美的安装成功菜单与节点链接
-echo -e "${BLUE}==================================================${NC}"
-echo -e "${GREEN}             🎉 VLESS-Reality 搭建成功！            ${NC}"
-echo -e "${BLUE}==================================================${NC}"
-echo -e "${YELLOW}服务器 IPv4:${NC} ${SERVER_IP}"
-echo -e "${YELLOW}端口 (Port):${NC} ${PORT}"
-echo -e "${YELLOW}用户 UUID:${NC} ${UUID}"
-echo -e "${YELLOW}流控 (Flow):${NC} xtls-rprx-vision"
-echo -e "${YELLOW}公开密钥 (PublicKey):${NC} ${PUBLIC_KEY}"
-echo -e "${YELLOW}Short ID:${NC} ${SHORT_ID}"
-echo -e "${YELLOW}伪装域名 (SNI):${NC} ${CUSTOM_SNI}"
-echo -e "${BLUE}--------------------------------------------------${NC}"
-echo -e "${GREEN}您的客户端通用 VLESS 链接 (复制即可导入):${NC}"
-echo -e "${CYAN}vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&spx=%2F&type=tcp&flow=xtls-rprx-vision&sni=${CUSTOM_SNI}&sid=${SHORT_ID}#My_Custom_Reality${NC}"
-echo -e "${BLUE}==================================================${NC}"
+# 拼接完整的标准通用一键导入链接
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&spx=%2F&type=tcp&flow=xtls-rprx-vision&sni=${CUSTOM_SNI}&sid=${SHORT_ID}#My_Custom_Reality"
+
+# 10. 打印超完整、格式化的节点参数面板
+clear
+echo -e "${PURPLE}┌────────────────────────────────────────────────────────┐${NC}"
+echo -e "${PURPLE}│                🎉 VLESS-Reality 搭建成功！             │${NC}"
+echo -e "${PURPLE}└────────────────────────────────────────────────────────┘${NC}"
+echo -e " ${GREEN}完整的节点明细参数清单 (供手动录入参考)：${NC}"
+echo -e " --------------------------------------------------------"
+echo -e "  ${YELLOW}协议类型 (Protocol):${NC}  VLESS"
+echo -e "  ${YELLOW}服务器地址 (Address):${NC} ${SERVER_IP}"
+echo -e "  ${YELLOW}端口号 (Port):${NC}        ${PORT}"
+echo -e "  ${YELLOW}用户UUID (ID):${NC}        ${UUID}"
+echo -e "  ${YELLOW}流控参数 (Flow):${NC}      xtls-rprx-vision"
+echo -e "  ${YELLOW}加密方式 (Encryption):${NC}none"
+echo -e "  ${YELLOW}传输层网络 (Network):${NC} tcp"
+echo -e "  ${YELLOW}安全传输 (Security):${NC}  reality"
+echo -e "  ${YELLOW}目标伪装 (Dest):${NC}      ${CUSTOM_SNI}:443"
+echo -e "  ${YELLOW}伪装域名 (SNI):${NC}       ${CUSTOM_SNI}"
+echo -e "  ${YELLOW}公钥 (PublicKey/pbk):${NC}${PUBLIC_KEY}"
+echo -e "  ${YELLOW}短ID (ShortID/sid):${NC}  ${SHORT_ID}"
+echo -e "  ${YELLOW}客户端指纹 (Finger):${NC} chrome"
+echo -e "  ${YELLOW}应用层协议 (ALPN):${NC}    h2, http/1.1"
+echo -e "  ${YELLOW}出站解析策略:${NC}         强制仅使用 IPv4"
+echo -e "${PURPLE}──────────────────────────────────────────────────────────${NC}"
+echo -e " ${GREEN}🔗 客户端通用一键导入链接 (直接全选复制)：${NC}"
+echo -e "${CYAN}${VLESS_LINK}${NC}"
+echo -e "${PURPLE}──────────────────────────────────────────────────────────${NC}"
+
+# 11. 调用 qrencode 动态渲染终端二维码
+echo -e " ${GREEN}📱 手机客户端扫码快捷导入：${NC}"
+echo ""
+qrencode -t UTF8 "${VLESS_LINK}"
+echo ""
+echo -e "${PURPLE}└────────────────────────────────────────────────────────┘${NC}"
