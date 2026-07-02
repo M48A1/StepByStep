@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==================== 版本信息 ====================
-VERSION="1.0.1"
+VERSION="1.0.2"
 BUILD_DATE="2026-07-02"
 
 # 全局错误处理
@@ -200,9 +200,28 @@ generate_vless_reality_client_config() {
     local short_id=$6
     local node_name=$7
     
+    # 参数验证
+    if [ -z "$uuid" ] || [ -z "$server_ip" ] || [ -z "$port" ] || [ -z "$public_key" ] || [ -z "$server_name" ] || [ -z "$short_id" ]; then
+        echo -e "${RED}❌ 错误：generate_vless_reality_client_config 参数不完整${NC}" >&2
+        echo -e "${YELLOW}  uuid: ${uuid:-'(空)'}${NC}" >&2
+        echo -e "${YELLOW}  server_ip: ${server_ip:-'(空)'}${NC}" >&2
+        echo -e "${YELLOW}  port: ${port:-'(空)'}${NC}" >&2
+        echo -e "${YELLOW}  public_key: ${public_key:-'(空)'}${NC}" >&2
+        echo -e "${YELLOW}  server_name: ${server_name:-'(空)'}${NC}" >&2
+        echo -e "${YELLOW}  short_id: ${short_id:-'(空)'}${NC}" >&2
+        return 1
+    fi
+    
     # VLESS Reality 标准格式 (不包含 over-tls)
     # reality 安全协议应该直接在 security 字段中指定
     local client_url="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=xtls-rprx-vision&pbk=${public_key}&sni=${server_name}&sid=${short_id}#${node_name}"
+    
+    # 验证生成的URL
+    if [[ ! "$client_url" =~ ^vless:// ]]; then
+        echo -e "${RED}❌ 错误：生成的URL格式错误${NC}" >&2
+        return 1
+    fi
+    
     echo "${client_url}"
 }
 
@@ -498,6 +517,17 @@ EOF
         return 1
     fi
     
+    # 调试：显示所有参数
+    echo -e "${YELLOW}调试 - 生成链接前的参数：${NC}"
+    echo -e "${CYAN}  UUID        : ${UUID}${NC}"
+    echo -e "${CYAN}  SERVER_IP   : ${SERVER_IP}${NC}"
+    echo -e "${CYAN}  PORT        : ${PORT}${NC}"
+    echo -e "${CYAN}  PUBLIC_KEY  : ${PUBLIC_KEY}${NC}"
+    echo -e "${CYAN}  CUSTOM_SNI  : ${CUSTOM_SNI}${NC}"
+    echo -e "${CYAN}  SHORT_ID    : ${SHORT_ID}${NC}"
+    echo -e "${CYAN}  NODE_NAME   : ${NODE_NAME}${NC}"
+    echo ""
+    
     ENCODED_NODE_NAME=$(echo -n "${NODE_NAME}" | jq -sRr @uri)
     VLESS_LINK=$(generate_vless_reality_client_config \
         "${UUID}" \
@@ -508,12 +538,26 @@ EOF
         "${SHORT_ID}" \
         "${ENCODED_NODE_NAME}")
     
+    # 调试：显示生成的链接
+    echo -e "${YELLOW}调试 - 生成的链接：${NC}"
+    echo -e "${CYAN}${VLESS_LINK}${NC}"
+    echo ""
+    
     # 验证生成的链接
     if [[ ! "$VLESS_LINK" =~ ^vless:// ]]; then
         echo -e "${RED}❌ 错误：客户端配置链接生成失败${NC}"
         echo -e "${YELLOW}生成的链接: ${VLESS_LINK}${NC}"
         return 1
     fi
+    
+    # 检查是否包含占位符
+    if [[ "$VLESS_LINK" =~ \(PublicKey\) ]]; then
+        echo -e "${RED}❌ 错误：生成的链接仍包含占位符 (PublicKey)${NC}"
+        echo -e "${YELLOW}这表示 PUBLIC_KEY 变量为空或格式错误${NC}"
+        echo -e "${YELLOW}实际接收到的公钥值: '${PUBLIC_KEY}'${NC}"
+        return 1
+    fi
+    
     echo -e "${GREEN}✅ 客户端配置链接生成成功${NC}"
     
     # 13. 输出结果
@@ -538,6 +582,27 @@ EOF
     echo -e "${PURPLE}═══════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}${VLESS_LINK}${NC}"
     echo -e "${PURPLE}═══════════════════════════════════════════════════${NC}"
+    echo ""
+    
+    # 链接有效性验证
+    echo -e "${YELLOW}📊 链接验证${NC}"
+    if [[ "$VLESS_LINK" =~ pbk=([a-zA-Z0-9_-]+) ]]; then
+        echo -e "${GREEN}✅ Public Key 正确: ${BASH_REMATCH[1]}${NC}"
+    else
+        echo -e "${RED}⚠️ Public Key 可能异常，请检查${NC}"
+    fi
+    
+    if [[ "$VLESS_LINK" =~ sid=([a-f0-9]{16}) ]]; then
+        echo -e "${GREEN}✅ Short ID 正确: ${BASH_REMATCH[1]}${NC}"
+    else
+        echo -e "${RED}⚠️ Short ID 格式异常${NC}"
+    fi
+    
+    if [[ "$VLESS_LINK" =~ sni=([a-zA-Z0-9._-]+) ]]; then
+        echo -e "${GREEN}✅ SNI 正确: ${BASH_REMATCH[1]}${NC}"
+    else
+        echo -e "${RED}⚠️ SNI 格式异常${NC}"
+    fi
     echo ""
     
     # 生成二维码
