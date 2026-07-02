@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.0.1"
+VERSION="2.0.3"
 BUILD_DATE="2026-07-02"
 
 set -Eeuo pipefail
@@ -181,7 +181,7 @@ write_xray_config() {
             log: {
                 access: "/var/log/xray/access.log",
                 error: "/var/log/xray/error.log",
-                loglevel: "info"
+                loglevel: "debug"
             },
             inbounds: [
                 {
@@ -203,7 +203,7 @@ write_xray_config() {
                         network: "tcp",
                         security: "reality",
                         realitySettings: {
-                            show: false,
+                            show: true,
                             target: ($sni + ":443"),
                             xver: 0,
                             serverNames: [$sni],
@@ -319,6 +319,7 @@ write_client_info() {
 端口: ${PORT}
 协议: VLESS
 传输: TCP
+UDP: 不启用
 安全: REALITY
 Flow: ${FLOW}
 UUID: ${UUID}
@@ -342,6 +343,7 @@ EOF
     echo -e "端口              : ${CYAN}${PORT}${NC}"
     echo -e "协议              : ${CYAN}VLESS${NC}"
     echo -e "传输              : ${CYAN}TCP${NC}"
+    echo -e "UDP               : ${CYAN}不启用${NC}"
     echo -e "安全              : ${CYAN}REALITY${NC}"
     echo -e "Flow              : ${CYAN}${FLOW}${NC}"
     echo -e "UUID              : ${CYAN}${UUID}${NC}"
@@ -369,7 +371,8 @@ EOF
     echo "ufw status verbose"
     echo
     warn "如果 Loon 测试时日志没有新增，请优先检查 VPS 商家安全组是否放行 ${PORT}/tcp。"
-    warn "客户端先测试 TCP 访问，UDP 测试请等 TCP 可用后再开。"
+    warn "当前节点为 TCP 传输，请先用 TCP 访问测试连通性。"
+    warn "TCP 端口能连通不等于节点可用；请观察日志里是否出现 VLESS accepted 或 REALITY rejected。"
     echo
     echo "节点信息已保存到：$XRAY_META"
 }
