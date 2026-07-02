@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # ==================== 版本信息 ====================
-VERSION="1.0.4"
+VERSION="1.0.5"
 BUILD_DATE="2026-07-02"
 
 # 全局错误处理
 set -e
-trap 'echo -e "${RED}❌ 脚本执行失败，已停止${NC}" >&2' ERR
+trap 'echo -e "${RED}❌ 脚本在第 ${LINENO} 行失败：${BASH_COMMAND}${NC}" >&2' ERR
 
 # ==================== 颜色定义 ====================
 GREEN='\033[0;32m'
@@ -668,7 +668,7 @@ INSTALL_COUNT=0
 
 while [ $INSTALL_COUNT -lt $INSTALL_RETRIES ]; do
     if curl -Ls --connect-timeout 10 --max-time 60 https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$XRAY_INSTALL_SCRIPT" 2>/dev/null && [ -s "$XRAY_INSTALL_SCRIPT" ]; then
-        if bash "$XRAY_INSTALL_SCRIPT" @ install >"$XRAY_INSTALL_LOG" 2>&1; then
+        if bash "$XRAY_INSTALL_SCRIPT" install >"$XRAY_INSTALL_LOG" 2>&1; then
             break
         fi
     else
