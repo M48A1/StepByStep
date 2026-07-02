@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.1.0"
+VERSION="2.2.1"
 BUILD_DATE="2026-07-02"
 
 set -Eeuo pipefail
@@ -14,23 +14,26 @@ NC='\033[0m'
 
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_CONFIG="/usr/local/etc/xray/config.json"
-XRAY_META="/usr/local/etc/xray/reality-client.txt"
+XRAY_INFO="/usr/local/etc/xray/vless-reality-info.txt"
+XRAY_QR="/usr/local/etc/xray/vless-reality-qr.png"
 XRAY_LOG_DIR="/var/log/xray"
-FLOW="xtls-rprx-vision"
-REALITY_INNER_PORT="45987"
-INSTALL_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+XRAY_INSTALL_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
-trap 'echo -e "${RED}错误：第 ${LINENO} 行执行失败：${BASH_COMMAND}${NC}" >&2' ERR
+FLOW="xtls-rprx-vision"
+FINGERPRINT="chrome"
+SPIDER_X="/"
+
+trap 'echo -e "${RED}错误：第 ${LINENO} 行失败：${BASH_COMMAND}${NC}" >&2' ERR
 
 info() { echo -e "${CYAN}$*${NC}"; }
 ok() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${YELLOW}$*${NC}"; }
 die() { echo -e "${RED}$*${NC}" >&2; exit 1; }
 
-print_banner() {
+banner() {
     clear || true
     echo -e "${BLUE}==================================================${NC}"
-    echo -e "${GREEN} VLESS Vision REALITY Installer${NC}"
+    echo -e "${GREEN} VLESS REALITY 一键安装脚本${NC}"
     echo -e "${CYAN} Version: ${VERSION} | Build: ${BUILD_DATE}${NC}"
     echo -e "${BLUE}==================================================${NC}"
 }
@@ -39,13 +42,13 @@ require_root() {
     [ "${EUID}" -eq 0 ] || die "请使用 root 权限运行。"
 }
 
-check_system() {
-    command -v apt-get >/dev/null 2>&1 || die "当前脚本仅支持 Debian/Ubuntu 系统。"
-    command -v systemctl >/dev/null 2>&1 || die "当前系统缺少 systemctl，无法管理 Xray 服务。"
+check_os() {
+    command -v apt-get >/dev/null 2>&1 || die "仅支持 Debian/Ubuntu。"
+    command -v systemctl >/dev/null 2>&1 || die "当前系统缺少 systemctl。"
 }
 
 install_dependencies() {
-    info "正在安装系统依赖..."
+    info "安装依赖..."
     apt-get update -qq
     apt-get install -y curl jq openssl iproute2 ca-certificates qrencode ufw
 }
@@ -55,7 +58,7 @@ remove_old_config() {
         return
     fi
 
-    warn "检测到旧 Xray 配置：$XRAY_CONFIG"
+    warn "检测到旧配置：$XRAY_CONFIG"
     read -r -p "是否删除旧配置并继续？(y/n): " answer
     case "$answer" in
         y|Y)
@@ -63,57 +66,45 @@ remove_old_config() {
             ok "旧配置已删除。"
             ;;
         *)
-            warn "已取消安装，旧配置未修改。"
+            warn "已取消，旧配置未修改。"
             exit 0
             ;;
     esac
 }
 
 install_xray() {
-    if [ -x "$XRAY_BIN" ]; then
-        ok "检测到已安装 Xray：$($XRAY_BIN version 2>/dev/null | head -n 1 || true)"
-        return
-    fi
-
-    info "正在安装 Xray 核心..."
-    local script_path log_path retries count
+    info "安装/更新 Xray..."
+    local script_path log_path
     script_path=$(mktemp)
     log_path=$(mktemp)
-    retries=3
-    count=1
 
-    while [ "$count" -le "$retries" ]; do
-        if curl -fsSL --connect-timeout 20 --max-time 180 "$INSTALL_URL" -o "$script_path"; then
-            if bash "$script_path" install >"$log_path" 2>&1; then
-                rm -f "$script_path" "$log_path"
-                ok "Xray 核心安装成功。"
-                return
-            fi
-        else
-            echo "下载 Xray 安装脚本失败：$INSTALL_URL" >"$log_path"
-        fi
+    if ! curl -fsSL --connect-timeout 20 --max-time 180 "$XRAY_INSTALL_URL" -o "$script_path"; then
+        rm -f "$script_path" "$log_path"
+        die "下载 Xray 安装脚本失败。"
+    fi
 
-        warn "Xray 安装失败，准备重试 (${count}/${retries})..."
-        count=$((count + 1))
-        sleep 5
-    done
+    if ! bash "$script_path" install >"$log_path" 2>&1; then
+        warn "Xray 安装失败，最近日志："
+        tail -n 60 "$log_path" || true
+        rm -f "$script_path" "$log_path"
+        die "Xray 安装失败。"
+    fi
 
-    warn "最近一次安装日志："
-    tail -n 40 "$log_path" 2>/dev/null || true
     rm -f "$script_path" "$log_path"
-    die "Xray 核心安装失败。"
+    [ -x "$XRAY_BIN" ] || die "未找到 Xray 可执行文件：$XRAY_BIN"
+    ok "$($XRAY_BIN version | head -n 1)"
 }
 
-prompt_settings() {
-    read -r -p "节点名称 [默认: My_Reality]: " NODE_NAME
-    NODE_NAME=${NODE_NAME:-My_Reality}
+ask_settings() {
+    read -r -p "节点名称 [默认: My_VLESS]: " NODE_NAME
+    NODE_NAME=${NODE_NAME:-My_VLESS}
 
     read -r -p "监听端口 [默认: 443]: " PORT
     PORT=${PORT:-443}
     [[ "$PORT" =~ ^[0-9]+$ ]] || die "端口必须是数字。"
     [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "端口必须在 1-65535 之间。"
 
-    echo "选择 REALITY 目标 SNI："
+    echo "选择 REALITY 伪装目标 SNI："
     echo "  1. download-installer.cdn.mozilla.net"
     echo "  2. addons.mozilla.org"
     echo "  3. www.microsoft.com"
@@ -121,15 +112,15 @@ prompt_settings() {
     echo "  5. www.cloudflare.com"
     echo "  6. 自定义"
     while true; do
-        read -r -p "请选择 1-6: " sni_choice
-        case "$sni_choice" in
+        read -r -p "请选择 1-6: " choice
+        case "$choice" in
             1) SNI="download-installer.cdn.mozilla.net"; break ;;
             2) SNI="addons.mozilla.org"; break ;;
             3) SNI="www.microsoft.com"; break ;;
             4) SNI="www.apple.com"; break ;;
             5) SNI="www.cloudflare.com"; break ;;
             6)
-                read -r -p "请输入自定义 SNI: " SNI
+                read -r -p "请输入 SNI 域名: " SNI
                 [[ "$SNI" =~ ^[A-Za-z0-9._-]+$ ]] || die "SNI 格式不正确。"
                 break
                 ;;
@@ -137,43 +128,42 @@ prompt_settings() {
         esac
     done
 
-    ok "已启用 Vision flow：$FLOW"
-    ok "已选择 SNI：$SNI"
+    ok "节点名称: $NODE_NAME"
+    ok "监听端口: $PORT"
+    ok "SNI: $SNI"
 }
 
-generate_keys() {
-    info "正在生成 UUID、REALITY 密钥和 Short ID..."
+generate_values() {
+    info "生成 UUID、REALITY 密钥、Short ID..."
     UUID=$("$XRAY_BIN" uuid)
     SHORT_ID=$(openssl rand -hex 8)
 
-    local keys
-    keys=$("$XRAY_BIN" x25519)
-    PRIVATE_KEY=$(echo "$keys" | awk -F': ' '/Private key|PrivateKey|Private/ {print $2}' | tail -n 1 | tr -d '[:space:]')
-    PUBLIC_KEY=$(echo "$keys" | awk -F': ' '/Public key|PublicKey|Password/ {print $2}' | tail -n 1 | tr -d '[:space:]')
+    local key_output
+    key_output=$("$XRAY_BIN" x25519)
+    PRIVATE_KEY=$(echo "$key_output" | awk -F': ' '/Private key|PrivateKey|Private/ {print $2}' | tail -n 1 | tr -d '[:space:]')
+    PUBLIC_KEY=$(echo "$key_output" | awk -F': ' '/Public key|PublicKey|Password/ {print $2}' | tail -n 1 | tr -d '[:space:]')
 
     [[ "$UUID" =~ ^[0-9a-fA-F-]{36}$ ]] || die "UUID 生成失败：$UUID"
     [[ "$SHORT_ID" =~ ^[0-9a-f]{16}$ ]] || die "Short ID 生成失败：$SHORT_ID"
-    [[ "$PRIVATE_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]] || die "Private Key 解析失败。Xray 输出：$keys"
-    [[ "$PUBLIC_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]] || die "Public Key 解析失败。Xray 输出：$keys"
-
-    ok "密钥生成完成。"
+    [[ "$PRIVATE_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]] || die "Private Key 解析失败。Xray 输出：$key_output"
+    [[ "$PUBLIC_KEY" =~ ^[A-Za-z0-9_-]{43,44}$ ]] || die "Public Key 解析失败。Xray 输出：$key_output"
 }
 
-get_xray_user() {
+xray_user() {
     local user
-    user=$(systemctl cat xray 2>/dev/null | awk -F= '/^[[:space:]]*User=/ {print $2; exit}' | tr -d '[:space:]')
+    user=$(systemctl show -p User --value xray 2>/dev/null | tr -d '[:space:]')
     echo "${user:-root}"
 }
 
-write_xray_config() {
-    info "正在写入 Xray 配置..."
+write_config() {
+    info "写入 Xray 配置..."
     mkdir -p "$(dirname "$XRAY_CONFIG")" "$XRAY_LOG_DIR"
     touch "$XRAY_LOG_DIR/access.log" "$XRAY_LOG_DIR/error.log"
 
     jq -n \
         --arg uuid "$UUID" \
         --arg flow "$FLOW" \
-        --arg email "${NODE_NAME}-vless-reality-vision" \
+        --arg email "${NODE_NAME}@vless-reality" \
         --arg sni "$SNI" \
         --arg privateKey "$PRIVATE_KEY" \
         --arg shortId "$SHORT_ID" \
@@ -182,29 +172,13 @@ write_xray_config() {
             log: {
                 access: "/var/log/xray/access.log",
                 error: "/var/log/xray/error.log",
-                loglevel: "debug"
+                loglevel: "info"
             },
             inbounds: [
                 {
-                    tag: "dokodemo-in-VLESSReality",
+                    tag: "vless-reality",
                     listen: "0.0.0.0",
                     port: $port,
-                    protocol: "dokodemo-door",
-                    settings: {
-                        address: "127.0.0.1",
-                        port: 45987,
-                        network: "tcp"
-                    },
-                    sniffing: {
-                        enabled: true,
-                        destOverride: ["tls"],
-                        routeOnly: true
-                    }
-                },
-                {
-                    tag: "vless-reality-vision",
-                    listen: "127.0.0.1",
-                    port: 45987,
                     protocol: "vless",
                     settings: {
                         clients: [
@@ -220,13 +194,12 @@ write_xray_config() {
                         network: "tcp",
                         security: "reality",
                         realitySettings: {
-                            show: true,
+                            show: false,
                             target: ($sni + ":443"),
                             xver: 0,
                             serverNames: [$sni],
                             privateKey: $privateKey,
-                            shortIds: [$shortId],
-                            maxTimeDiff: 60000
+                            shortIds: [$shortId]
                         }
                     },
                     sniffing: {
@@ -238,196 +211,161 @@ write_xray_config() {
             ],
             outbounds: [
                 {
-                    tag: "z_direct_outbound",
+                    tag: "direct",
                     protocol: "freedom"
                 },
                 {
-                    tag: "blackhole_out",
+                    tag: "block",
                     protocol: "blackhole"
                 }
-            ],
-            routing: {
-                rules: [
-                    {
-                        inboundTag: ["dokodemo-in-VLESSReality"],
-                        outboundTag: "z_direct_outbound"
-                    }
-                ]
-            },
-            policy: {
-                levels: {
-                    "0": {
-                        handshake: 4,
-                        connIdle: 300,
-                        uplinkOnly: 2,
-                        downlinkOnly: 5
-                    }
-                }
-            },
-            stats: {}
+            ]
         }' >"$XRAY_CONFIG"
 
-    local xray_user
-    xray_user=$(get_xray_user)
-    chmod 640 "$XRAY_CONFIG"
+    local user
+    user=$(xray_user)
+    chmod 644 "$XRAY_CONFIG"
     chmod 755 "$XRAY_LOG_DIR"
     chmod 644 "$XRAY_LOG_DIR/access.log" "$XRAY_LOG_DIR/error.log"
-    if [ "$xray_user" != "root" ] && id "$xray_user" >/dev/null 2>&1; then
-        chown "$xray_user":"$xray_user" "$XRAY_CONFIG" 2>/dev/null || chown "$xray_user":nogroup "$XRAY_CONFIG" 2>/dev/null || true
-        chown -R "$xray_user":"$xray_user" "$XRAY_LOG_DIR" 2>/dev/null || chown -R "$xray_user":nogroup "$XRAY_LOG_DIR" 2>/dev/null || true
+    if [ "$user" != "root" ] && id "$user" >/dev/null 2>&1; then
+        chown -R "$user":"$user" "$XRAY_LOG_DIR" 2>/dev/null || chown -R "$user":nogroup "$XRAY_LOG_DIR" 2>/dev/null || true
     fi
 
     "$XRAY_BIN" -test -config "$XRAY_CONFIG" >/dev/null
-    ok "Xray 配置校验通过。"
+    ok "配置校验通过。"
 }
 
-configure_firewall() {
-    if ! command -v ufw >/dev/null 2>&1; then
-        return
-    fi
-
-    info "正在配置 UFW 放行规则..."
-    local ssh_port
-    ssh_port=$(ss -tlnp 2>/dev/null | awk '/sshd/ {print $4}' | awk -F':' '{print $NF}' | head -n 1)
-    ssh_port=${ssh_port:-22}
-
-    ufw allow "${ssh_port}/tcp" >/dev/null 2>&1 || true
-    ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
-
-    if ufw status 2>/dev/null | grep -q "Status: active"; then
-        ok "UFW 已放行 SSH(${ssh_port}/tcp) 和节点端口(${PORT}/tcp)。"
-        return
-    fi
-
-    read -r -p "UFW 当前未启用，是否启用？可能影响现有 SSH 连接。(y/n): " enable_ufw
-    if [[ "$enable_ufw" == "y" || "$enable_ufw" == "Y" ]]; then
-        ufw --force enable
-        ok "UFW 已启用。"
-    else
-        warn "已跳过启用 UFW。请确认 VPS 商家安全组已放行 ${PORT}/tcp。"
+open_firewall() {
+    info "放行防火墙端口..."
+    if command -v ufw >/dev/null 2>&1; then
+        local ssh_port
+        ssh_port=$(ss -tlnp 2>/dev/null | awk '/sshd/ {print $4}' | awk -F':' '{print $NF}' | head -n 1)
+        ssh_port=${ssh_port:-22}
+        ufw allow "${ssh_port}/tcp" >/dev/null 2>&1 || true
+        ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
+            ok "UFW 已放行 ${PORT}/tcp。"
+        else
+            warn "UFW 未启用。请确认 VPS 服务商安全组已放行 ${PORT}/tcp。"
+        fi
     fi
 }
 
 enable_bbr() {
-    info "正在配置 BBR..."
+    info "配置 BBR..."
     grep -q '^net.core.default_qdisc=fq' /etc/sysctl.conf || echo 'net.core.default_qdisc=fq' >>/etc/sysctl.conf
     grep -q '^net.ipv4.tcp_congestion_control=bbr' /etc/sysctl.conf || echo 'net.ipv4.tcp_congestion_control=bbr' >>/etc/sysctl.conf
-    sysctl -p >/dev/null 2>&1 || warn "当前环境无法立即应用 sysctl，重启后通常会生效。"
+    sysctl -p >/dev/null 2>&1 || warn "sysctl 暂时未生效，重启后通常会生效。"
 }
 
 restart_xray() {
-    info "正在启动 Xray 服务..."
+    info "启动 Xray..."
     systemctl daemon-reload
     systemctl enable --now xray
+    systemctl restart xray
     sleep 2
+
     systemctl is-active --quiet xray || {
         systemctl status xray --no-pager || true
-        die "Xray 服务启动失败。"
+        die "Xray 启动失败。"
     }
 
-    if ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${PORT}$"; then
-        ok "Xray 已启动并监听 ${PORT}/tcp。"
-    else
-        ss -tlnp 2>/dev/null || true
-        die "Xray 已启动，但没有监听 ${PORT}/tcp。"
-    fi
+    ss -tln 2>/dev/null | awk '{print $4}' | grep -Eq "(:|\\])${PORT}$" || {
+        ss -tlnp || true
+        die "Xray 未监听 ${PORT}/tcp。"
+    }
+    ok "Xray 正在监听 ${PORT}/tcp。"
 }
 
 get_public_ip() {
     SERVER_IP=$(curl -4fsS --max-time 8 https://api.ipify.org 2>/dev/null || \
         curl -4fsS --max-time 8 https://ipv4.icanhazip.com 2>/dev/null || \
         hostname -I 2>/dev/null | awk '{print $1}' || true)
-
     if [ -z "${SERVER_IP:-}" ]; then
-        read -r -p "无法自动获取公网 IP，请手动输入: " SERVER_IP
+        read -r -p "无法自动获取公网 IP，请输入服务器 IP: " SERVER_IP
     fi
-    [ -n "$SERVER_IP" ] || die "服务器公网 IP 不能为空。"
+    [ -n "$SERVER_IP" ] || die "服务器 IP 不能为空。"
 }
 
-write_client_info() {
-    local encoded_name vless_link
+print_result() {
+    local encoded_name link
     encoded_name=$(printf '%s' "$NODE_NAME" | jq -sRr @uri)
-    vless_link="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&flow=${FLOW}&pbk=${PUBLIC_KEY}&fp=chrome&sni=${SNI}&sid=${SHORT_ID}&spx=%2F#${encoded_name}"
+    link="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&flow=${FLOW}&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=%2F#${encoded_name}"
 
-    cat >"$XRAY_META" <<EOF
+    cat >"$XRAY_INFO" <<EOF
 节点名称: ${NODE_NAME}
 服务器: ${SERVER_IP}
 端口: ${PORT}
 协议: VLESS
 传输: TCP
-UDP: 不启用
 安全: REALITY
 Flow: ${FLOW}
 UUID: ${UUID}
 SNI: ${SNI}
 Public Key: ${PUBLIC_KEY}
 Short ID: ${SHORT_ID}
-Fingerprint: chrome
-SpiderX: /
+Fingerprint: ${FINGERPRINT}
+SpiderX: ${SPIDER_X}
 
 VLESS 链接:
-${vless_link}
+${link}
 EOF
-    chmod 600 "$XRAY_META"
+    chmod 600 "$XRAY_INFO"
 
     clear || true
-    ok "安装完成。"
+    ok "VLESS REALITY 节点搭建完成。"
     echo
-    echo -e "${BLUE}================ 节点信息 ================${NC}"
-    echo -e "节点名称          : ${CYAN}${NODE_NAME}${NC}"
-    echo -e "服务器            : ${CYAN}${SERVER_IP}${NC}"
-    echo -e "端口              : ${CYAN}${PORT}${NC}"
-    echo -e "协议              : ${CYAN}VLESS${NC}"
-    echo -e "传输              : ${CYAN}TCP${NC}"
-    echo -e "UDP               : ${CYAN}不启用${NC}"
-    echo -e "安全              : ${CYAN}REALITY${NC}"
-    echo -e "Flow              : ${CYAN}${FLOW}${NC}"
-    echo -e "UUID              : ${CYAN}${UUID}${NC}"
-    echo -e "SNI               : ${CYAN}${SNI}${NC}"
-    echo -e "Public Key        : ${CYAN}${PUBLIC_KEY}${NC}"
-    echo -e "Short ID          : ${CYAN}${SHORT_ID}${NC}"
-    echo -e "Fingerprint       : ${CYAN}chrome${NC}"
-    echo -e "SpiderX           : ${CYAN}/${NC}"
+    echo -e "${BLUE}============== 客户端参数 ==============${NC}"
+    echo -e "服务器        : ${CYAN}${SERVER_IP}${NC}"
+    echo -e "端口          : ${CYAN}${PORT}${NC}"
+    echo -e "协议          : ${CYAN}VLESS${NC}"
+    echo -e "传输          : ${CYAN}TCP${NC}"
+    echo -e "安全          : ${CYAN}REALITY${NC}"
+    echo -e "Flow          : ${CYAN}${FLOW}${NC}"
+    echo -e "UUID          : ${CYAN}${UUID}${NC}"
+    echo -e "SNI           : ${CYAN}${SNI}${NC}"
+    echo -e "Public Key    : ${CYAN}${PUBLIC_KEY}${NC}"
+    echo -e "Short ID      : ${CYAN}${SHORT_ID}${NC}"
+    echo -e "Fingerprint   : ${CYAN}${FINGERPRINT}${NC}"
+    echo -e "SpiderX       : ${CYAN}${SPIDER_X}${NC}"
     echo
-    echo -e "${BLUE}================ VLESS 链接 ================${NC}"
-    echo -e "${CYAN}${vless_link}${NC}"
+    echo -e "${BLUE}============== 导入链接 ==============${NC}"
+    echo -e "${CYAN}${link}${NC}"
     echo
-
+    echo -e "${BLUE}============== 二维码 ==============${NC}"
     if command -v qrencode >/dev/null 2>&1; then
-        echo -e "${BLUE}================ 二维码 ================${NC}"
-        qrencode -t UTF8 -m 2 "$vless_link"
+        qrencode -t UTF8 -m 2 "$link"
+        qrencode -o "$XRAY_QR" "$link"
+        chmod 600 "$XRAY_QR"
         echo
+        echo "二维码图片已保存到：$XRAY_QR"
+        echo
+    else
+        warn "未检测到 qrencode，无法输出二维码。"
     fi
-
-    echo -e "${BLUE}================ 排查命令 ================${NC}"
+    echo -e "${BLUE}============== 排查命令 ==============${NC}"
     echo "systemctl status xray --no-pager"
     echo "journalctl -u xray -n 80 --no-pager"
     echo "tail -f /var/log/xray/access.log /var/log/xray/error.log"
     echo "ss -tlnp | grep ':${PORT}'"
-    echo "ufw status verbose"
     echo
-    warn "如果 Loon 测试时日志没有新增，请优先检查 VPS 商家安全组是否放行 ${PORT}/tcp。"
-    warn "当前节点为 TCP 传输，请先用 TCP 访问测试连通性。"
-    warn "TCP 端口能连通不等于节点可用；请观察日志里是否出现 VLESS accepted 或 REALITY rejected。"
-    echo
-    echo "节点信息已保存到：$XRAY_META"
+    warn "节点信息已保存到：$XRAY_INFO"
 }
 
 main() {
-    print_banner
+    banner
     require_root
-    check_system
+    check_os
     remove_old_config
     install_dependencies
     install_xray
-    prompt_settings
-    generate_keys
-    write_xray_config
-    configure_firewall
+    ask_settings
+    generate_values
+    write_config
+    open_firewall
     enable_bbr
     restart_xray
     get_public_ip
-    write_client_info
+    print_result
 }
 
 main "$@"
