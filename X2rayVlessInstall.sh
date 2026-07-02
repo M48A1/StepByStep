@@ -53,15 +53,20 @@ echo -e "${GREEN}已选择运行端口: ${PORT}${NC}"
 echo -e "${BLUE}--------------------------------------------------${NC}"
 
 # 4. 基础环境检查与安装依赖
-echo -e "${YELLOW}[1/5] 正在安装系统依赖环境及二维码组件...${NC}"
-apt-get update -y && apt-get install -y curl jq openssl uuid-runtime ufw iptables qrencode
+echo -e "${YELLOW}[1/6] 正在安装系统依赖环境及二维码组件...${NC}"
+apt-get update -y && apt-get install -y curl jq openssl uuid-runtime ufw iptables qrencode timate systemd-timesyncd
+
+# 细节优化：自动同步系统时间（防止 Reality 因时间不对导致握手失败）
+echo -e "${YELLOW}[2/6] 正在同步系统时钟...${NC}"
+timedatectl set-ntp true > /dev/null 2>&1
+systemctl restart systemd-timesyncd > /dev/null 2>&1
 
 # 5. 调用官方脚本安装最新的 Xray-core
-echo -e "${YELLOW}[2/5] 正在下载并安装官方 Xray-core...${NC}"
+echo -e "${YELLOW}[3/6] 正在下载并安装官方 Xray-core...${NC}"
 bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
 
-# 6. 自动生成 Reality 所需的各种随机密钥（修复重点：采用绝对路径与健壮截取）
-echo -e "${YELLOW}[3/5] 正在自动生成高性能安全配置...${NC}"
+# 6. 自动生成 Reality 所需的各种随机密钥
+echo -e "${YELLOW}[4/6] 正在自动生成高性能安全配置...${NC}"
 UUID=$(uuidgen)
 
 # 使用绝对路径调用 xray 生成密钥对
@@ -69,7 +74,7 @@ XRAY_KEYS=$(/usr/local/bin/xray x25519)
 PRIVATE_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Private key/{print $2}' | tr -d ' ')
 PUBLIC_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Public key/{print $2}' | tr -d ' ')
 
-# 健壮性检查：如果依然为空，进行二次兜底尝试
+# 健壮性检查兜底
 if [ -z "$PUBLIC_KEY" ]; then
     XRAY_KEYS=$(xray x25519 2>/dev/null)
     PRIVATE_KEY=$(echo "$XRAY_KEYS" | awk -F': ' '/Private key/{print $2}' | tr -d ' ')
@@ -148,7 +153,7 @@ cat <<EOF > /usr/local/etc/xray/config.json
 EOF
 
 # 8. 自动放行 VPS 系统防火墙端口
-echo -e "${YELLOW}[4/5] 正在自动配置防火墙放行端口 ${PORT}...${NC}"
+echo -e "${YELLOW}[5/6] 正在自动配置防火墙放行端口 ${PORT}...${NC}"
 if command -v ufw > /dev/null 2>&1; then
     ufw allow ${PORT}/tcp > /dev/null 2>&1
     ufw allow ${PORT}/udp > /dev/null 2>&1
@@ -156,8 +161,15 @@ fi
 iptables -I INPUT -p tcp --dport ${PORT} -j ACCEPT > /dev/null 2>&1
 iptables -I INPUT -p udp --dport ${PORT} -j ACCEPT > /dev/null 2>&1
 
+# 细节优化：自动开启内核系统级 BBR 加速（大幅提升网络速度与抗丢包能力）
+if ! grep -q "net.core.default_qdisc=fq" /etc/sysctl.conf; then
+    echo "net.core.default_qdisc=fq" >> /etc/sysctl.conf
+    echo "net.ipv4.tcp_congestion_control=bbr" >> /etc/sysctl.conf
+    sysctl -p > /dev/null 2>&1
+fi
+
 # 9. 启动服务并设置开机自启
-echo -e "${YELLOW}[5/5] 正在启动服务并设置开机自启...${NC}"
+echo -e "${YELLOW}[6/6] 正在启动服务并设置开机自启...${NC}"
 systemctl daemon-reload
 systemctl enable xray
 systemctl restart xray
@@ -168,8 +180,8 @@ if [ -z "$SERVER_IP" ]; then
     SERVER_IP=$(curl -s ifconfig.me)
 fi
 
-# 拼接完整的标准通用一键导入链接
-VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&spx=%2F&type=tcp&flow=xtls-rprx-vision&sni=${CUSTOM_SNI}&sid=${SHORT_ID}#My_Custom_Reality"
+# 细节优化：优化了链接后缀参数，加入了更稳妥的 URL 编码备注名
+VLESS_LINK="vless://${UUID}@${SERVER_IP}:${PORT}?security=reality&encryption=none&pbk=${PUBLIC_KEY}&headerType=none&fp=chrome&spx=%2F&type=tcp&flow=xtls-rprx-vision&sni=${CUSTOM_SNI}&sid=${SHORT_ID}#$(echo -n "My_Reality_Node" | xargs)"
 
 # 10. 打印超完整、格式化的节点参数面板
 clear
@@ -192,7 +204,7 @@ echo -e "${YELLOW}公钥 (PublicKey/pbk):${NC} ${PUBLIC_KEY}"
 echo -e "${YELLOW}短ID (ShortID/sid):${NC}   ${SHORT_ID}"
 echo -e "${YELLOW}客户端指纹 (Finger):${NC}  chrome"
 echo -e "${YELLOW}应用层协议 (ALPN):${NC}    h2, http/1.1"
-echo -e "${YELLOW}DNS解析策略:${NC}          强制仅使用 IPv4"
+echo -e "${YELLOW}DNS/出站解析策略:${NC}     内核级 BBR 加速 + 强制仅使用 IPv4"
 echo -e "${PURPLE}----------------------------------------------------------${NC}"
 echo -e "${GREEN}👉 🔗 客户端通用一键导入链接 (直接全选复制)：${NC}"
 echo -e "${CYAN}${VLESS_LINK}${NC}"
