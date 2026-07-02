@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# ==================== 版本信息 ====================
+VERSION="1.0.0"
+BUILD_DATE="2026-07-02"
+
 # 全局错误处理
 set -e
 trap 'echo -e "${RED}❌ 脚本执行失败，已停止${NC}" >&2' ERR
@@ -14,6 +18,12 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 clear
+echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
+echo -e "${CYAN}VLESS-Reality Installation Script${NC}"
+echo -e "${CYAN}Version: ${VERSION} | Build: ${BUILD_DATE}${NC}"
+echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
+echo ""
+
 echo -e "${BLUE}==================================================${NC}"
 echo -e "${GREEN}   VLESS-Reality Ultimate Final    ${NC}"
 echo -e "${BLUE}==================================================${NC}"
@@ -58,83 +68,111 @@ generate_xray_vless_vision_reality() {
         return 1
     fi
     
-    # 生成配置文件
-    if ! cat > "$configPath" <<'EOF'
-{
-    "log": { "loglevel": "warning" },
-    "dns": {
-        "servers": ["1.1.1.1", "1.0.0.1"],
-        "queryStrategy": "UseIPv4"
-    },
-    "inbounds": [{
-        "tag": "dokodemo-in-VLESSReality",
-        "port": PORT_PLACEHOLDER,
-        "protocol": "dokodemo-door",
-        "settings": {
-            "address": "127.0.0.1",
-            "port": 45987,
-            "network": "tcp"
-        },
-        "sniffing": {
-            "enabled": true,
-            "destOverride": ["tls"],
-            "routeOnly": true
-        }
-    },
-    {
-        "listen": "127.0.0.1",
-        "port": 45987,
-        "protocol": "vless",
-        "settings": {
-            "clients": [{ "id": "UUID_PLACEHOLDER", "flow": "xtls-rprx-vision" }],
-            "decryption": "none"
-        },
-        "streamSettings": {
-            "network": "tcp",
-            "security": "reality",
-            "realitySettings": {
-                "show": false,
-                "target": "SNI_PLACEHOLDER:443",
-                "xver": 0,
-                "serverNames": ["SNI_PLACEHOLDER"],
-                "privateKey": "PRIVATEKEY_PLACEHOLDER",
-                "publicKey": "PUBLICKEY_PLACEHOLDER",
-                "mldsa65Seed": "MLDSA65SEED_PLACEHOLDER",
-                "mldsa65Verify": "MLDSA65VERIFY_PLACEHOLDER",
-                "maxTimeDiff": 70000,
-                "shortIds": ["", "SHORTID_PLACEHOLDER"]
-            }
-        },
-        "sniffing": {
-            "enabled": true,
-            "destOverride": ["http", "tls", "quic"],
-            "routeOnly": true
-        }
-    }],
-    "outbounds": [{ "protocol": "freedom" }]
-}
-EOF
-    then
+    # 使用 jq 构建 Reality Settings
+    local realitySettings=$(jq -n \
+        --arg show "false" \
+        --arg target "${realityServerName}:${realityDomainPort}" \
+        --arg xver "0" \
+        --arg serverName "${realityServerName}" \
+        --arg privateKey "${realityPrivateKey}" \
+        --arg publicKey "${realityPublicKey}" \
+        --arg maxTimeDiff "70000" \
+        --arg shortId "${SHORT_ID}" \
+        '{
+            show: ($show == "true"),
+            target: $target,
+            xver: ($xver | tonumber),
+            serverNames: [$serverName],
+            privateKey: $privateKey,
+            publicKey: $publicKey,
+            maxTimeDiff: ($maxTimeDiff | tonumber),
+            shortIds: ["", $shortId]
+        }')
+    
+    # 如果有 ML-DSA-65 参数，添加到 realitySettings
+    if [ -n "$realityMldsa65Seed" ] && [ -n "$realityMldsa65Verify" ]; then
+        realitySettings=$(echo "$realitySettings" | jq \
+            --arg seed "$realityMldsa65Seed" \
+            --arg verify "$realityMldsa65Verify" \
+            '. + {mldsa65Seed: $seed, mldsa65Verify: $verify}')
+    fi
+    
+    # 使用 jq 构建完整配置
+    local fullConfig=$(jq -n \
+        --arg uuid "$UUID" \
+        --argjson port "$realityPort" \
+        --argjson realitySettings "$realitySettings" \
+        '{
+            "log": {
+                "loglevel": "warning"
+            },
+            "dns": {
+                "servers": ["1.1.1.1", "1.0.0.1"],
+                "queryStrategy": "UseIPv4"
+            },
+            "inbounds": [
+                {
+                    "tag": "dokodemo-in-VLESSReality",
+                    "port": $port,
+                    "protocol": "dokodemo-door",
+                    "settings": {
+                        "address": "127.0.0.1",
+                        "port": 45987,
+                        "network": "tcp"
+                    },
+                    "sniffing": {
+                        "enabled": true,
+                        "destOverride": ["tls"],
+                        "routeOnly": true
+                    }
+                },
+                {
+                    "listen": "127.0.0.1",
+                    "port": 45987,
+                    "protocol": "vless",
+                    "settings": {
+                        "clients": [
+                            {
+                                "id": $uuid,
+                                "flow": "xtls-rprx-vision"
+                            }
+                        ],
+                        "decryption": "none"
+                    },
+                    "streamSettings": {
+                        "network": "tcp",
+                        "security": "reality",
+                        "realitySettings": $realitySettings
+                    },
+                    "sniffing": {
+                        "enabled": true,
+                        "destOverride": ["http", "tls", "quic"],
+                        "routeOnly": true
+                    }
+                }
+            ],
+            "outbounds": [
+                {
+                    "protocol": "freedom"
+                }
+            ]
+        }')
+    
+    # 写入配置文件
+    if ! echo "$fullConfig" | jq '.' > "$configPath" 2>/dev/null; then
         echo -e "${RED}❌ 错误：无法写入配置文件 $configPath${NC}" >&2
         return 1
     fi
     
-    # 替换占位符为实际值
-    sed -i.bak "s|PORT_PLACEHOLDER|${realityPort}|g" "$configPath"
-    sed -i.bak "s|UUID_PLACEHOLDER|${UUID}|g" "$configPath"
-    sed -i.bak "s|SNI_PLACEHOLDER|${realityServerName}|g" "$configPath"
-    sed -i.bak "s|PRIVATEKEY_PLACEHOLDER|${realityPrivateKey}|g" "$configPath"
-    sed -i.bak "s|PUBLICKEY_PLACEHOLDER|${realityPublicKey}|g" "$configPath"
-    sed -i.bak "s|MLDSA65SEED_PLACEHOLDER|${realityMldsa65Seed}|g" "$configPath"
-    sed -i.bak "s|MLDSA65VERIFY_PLACEHOLDER|${realityMldsa65Verify}|g" "$configPath"
-    sed -i.bak "s|SHORTID_PLACEHOLDER|${SHORT_ID}|g" "$configPath"
-    
-    # 删除备份文件
-    rm -f "${configPath}.bak"
-    
     # 验证文件是否存在
     if [ ! -f "$configPath" ]; then
         echo -e "${RED}❌ 错误：配置文件创建后丢失 $configPath${NC}" >&2
+        return 1
+    fi
+    
+    # 验证JSON合法性
+    if ! jq empty "$configPath" 2>/dev/null; then
+        echo -e "${RED}❌ 错误：生成的JSON格式无效${NC}" >&2
         return 1
     fi
     
@@ -162,6 +200,8 @@ generate_vless_reality_client_config() {
     local short_id=$6
     local node_name=$7
     
+    # VLESS Reality 标准格式 (不包含 over-tls)
+    # reality 安全协议应该直接在 security 字段中指定
     local client_url="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=xtls-rprx-vision&pbk=${public_key}&sni=${server_name}&sid=${short_id}#${node_name}"
     echo "${client_url}"
 }
@@ -264,35 +304,31 @@ setup_vless_vision_reality() {
     # 1. 生成 Reality 密钥
     echo -e "${YELLOW}生成 Reality 密钥...${NC}"
     REALITY_KEYS=$(generate_reality_key_xray "")
+    
+    # 调试输出
+    echo -e "${YELLOW}调试：Xray x25519 输出：${NC}"
+    echo "$REALITY_KEYS"
+    
     PRIVATE_KEY=$(echo "$REALITY_KEYS" | grep "PrivateKey" | awk '{print $2}')
-    PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep "Password" | awk '{print $3}')
+    PUBLIC_KEY=$(echo "$REALITY_KEYS" | grep "PublicKey" | awk '{print $2}')
     
     if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
         echo -e "${RED}❌ 错误：未能生成 Reality 密钥${NC}"
+        echo -e "${YELLOW}完整输出：${NC}"
         echo "$REALITY_KEYS"
         return 1
     fi
     echo -e "${GREEN}✅ Reality 密钥生成成功${NC}"
+    echo -e "${YELLOW}  Private Key: ${PRIVATE_KEY}${NC}"
+    echo -e "${YELLOW}  Public Key: ${PUBLIC_KEY}${NC}"
     
     # 2. 生成 mldsa65 密钥 (可选)
     echo -e "${YELLOW}检查目标域名是否支持 ML-DSA-65...${NC}"
     MLDSA65_SEED=""
     MLDSA65_VERIFY=""
     
-    if /usr/local/bin/xray tls ping "${CUSTOM_SNI}:443" 2>/dev/null | grep -q "X25519MLKEM768"; then
-        LENGTH=$(/usr/local/bin/xray tls ping "${CUSTOM_SNI}:443" 2>/dev/null | grep "Certificate chain's total length:" | awk '{print $5}' | head -1)
-        if [ -n "$LENGTH" ] && [ "$LENGTH" -gt 3500 ]; then
-            echo -e "${YELLOW}生成 ML-DSA-65 密钥...${NC}"
-            MLDSA65=$(/usr/local/bin/xray mldsa65)
-            MLDSA65_SEED=$(echo "$MLDSA65" | head -1 | awk '{print $2}')
-            MLDSA65_VERIFY=$(echo "$MLDSA65" | tail -1 | awk '{print $2}')
-            echo -e "${GREEN}✅ ML-DSA-65 密钥生成成功${NC}"
-        else
-            echo -e "${YELLOW}⚠️ 证书链长度不足，跳过 ML-DSA-65${NC}"
-        fi
-    else
-        echo -e "${YELLOW}⚠️ 目标域名不支持 X25519MLKEM768，跳过 ML-DSA-65${NC}"
-    fi
+    # 暂时跳过 ML-DSA-65，专注于基础 Reality 握手
+    echo -e "${YELLOW}⚠️ 暂时跳过 ML-DSA-65 检测，采用标准 Reality 配置${NC}"
     
     # 3. 生成 UUID 和 Short ID
     echo -e "${YELLOW}生成 UUID 和 Short ID...${NC}"
