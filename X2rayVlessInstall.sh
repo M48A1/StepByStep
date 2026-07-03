@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.3"
+VERSION="2.4.4"
 BUILD_DATE="2026-07-03"
 
 set -Eeuo pipefail
@@ -222,10 +222,23 @@ write_config() {
                     }
                 }
             ],
+            routing: {
+                domainStrategy: "IPIfNonMatch",
+                rules: [
+                    {
+                        type: "field",
+                        ip: ["::/0"],
+                        outboundTag: "block"
+                    }
+                ]
+            },
             outbounds: [
                 {
                     tag: "direct",
-                    protocol: "freedom"
+                    protocol: "freedom",
+                    settings: {
+                        domainStrategy: "UseIPv4"
+                    }
                 },
                 {
                     tag: "block",
@@ -400,7 +413,7 @@ FINGERPRINT="chrome"
 SPIDER_X="/"
 FLOW="xtls-rprx-vision"
 DEFAULT_DNS_1="1.1.1.1"
-DEFAULT_DNS_2="8.8.8.8"
+DEFAULT_DNS_2="1.0.0.1"
 
 ok() { echo -e "${GREEN}$*${NC}"; }
 warn() { echo -e "${YELLOW}$*${NC}"; }
@@ -596,6 +609,28 @@ change_port() {
     warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
 }
 
+force_ipv4_outbound() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local tmp_config
+    tmp_config=$(mktemp)
+    jq '
+        (.outbounds[] | select(.tag == "direct" and .protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
+        | .routing = (.routing // {})
+        | .routing.domainStrategy = "IPIfNonMatch"
+        | .routing.rules = (
+            [.routing.rules[]? | select(.outboundTag != "block" or (((.ip // []) | index("::/0")) | not))]
+            + [{type: "field", ip: ["::/0"], outboundTag: "block"}]
+        )
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    mv "$tmp_config" "$XRAY_CONFIG"
+    systemctl restart xray
+    ok "已强制 Xray 使用 IPv4 出站，并阻止 IPv6 目标。"
+}
+
 change_dns() {
     require_root
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
@@ -648,9 +683,10 @@ manager_menu() {
         echo "2. 输出二维码"
         echo "3. 修改 SNI"
         echo "4. 修改端口"
-        echo "5. 修改 DNS"
-        echo "6. 重启 Xray"
-        echo "7. 查看 Xray 状态"
+        echo "5. 强制 IPv4 出站"
+        echo "6. 修改 DNS"
+        echo "7. 重启 Xray"
+        echo "8. 查看 Xray 状态"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -658,11 +694,12 @@ manager_menu() {
             2) show_qr ;;
             3) change_sni ;;
             4) change_port ;;
-            5) change_dns ;;
-            6) restart_service ;;
-            7) status_service ;;
+            5) force_ipv4_outbound ;;
+            6) change_dns ;;
+            7) restart_service ;;
+            8) status_service ;;
             0) exit 0 ;;
-            *) warn "请输入 0-7。" ;;
+            *) warn "请输入 0-8。" ;;
         esac
     done
 }
@@ -675,6 +712,7 @@ usage() {
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
   vless port <端口>     修改 VLESS 监听端口
+  vless ipv4           强制 IPv4 出站并阻止 IPv6 目标
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -691,6 +729,7 @@ dispatch() {
         qr) show_qr ;;
         sni|change-sni) shift; change_sni "${1:-}" ;;
         port|change-port) shift; change_port "${1:-}" ;;
+        ipv4|force-ipv4) force_ipv4_outbound ;;
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
@@ -894,6 +933,28 @@ change_port() {
     warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
 }
 
+force_ipv4_outbound() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local tmp_config
+    tmp_config=$(mktemp)
+    jq '
+        (.outbounds[] | select(.tag == "direct" and .protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
+        | .routing = (.routing // {})
+        | .routing.domainStrategy = "IPIfNonMatch"
+        | .routing.rules = (
+            [.routing.rules[]? | select(.outboundTag != "block" or (((.ip // []) | index("::/0")) | not))]
+            + [{type: "field", ip: ["::/0"], outboundTag: "block"}]
+        )
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    mv "$tmp_config" "$XRAY_CONFIG"
+    systemctl restart xray
+    ok "已强制 Xray 使用 IPv4 出站，并阻止 IPv6 目标。"
+}
+
 validate_dns_value() {
     local value=$1
     [[ "$value" =~ ^[A-Za-z0-9:._-]+$ ]]
@@ -952,9 +1013,10 @@ manager_menu() {
         echo "2. 输出二维码"
         echo "3. 修改 SNI"
         echo "4. 修改端口"
-        echo "5. 修改 DNS"
-        echo "6. 重启 Xray"
-        echo "7. 查看 Xray 状态"
+        echo "5. 强制 IPv4 出站"
+        echo "6. 修改 DNS"
+        echo "7. 重启 Xray"
+        echo "8. 查看 Xray 状态"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -962,11 +1024,12 @@ manager_menu() {
             2) show_qr ;;
             3) change_sni ;;
             4) change_port ;;
-            5) change_dns ;;
-            6) restart_service ;;
-            7) status_service ;;
+            5) force_ipv4_outbound ;;
+            6) change_dns ;;
+            7) restart_service ;;
+            8) status_service ;;
             0) exit 0 ;;
-            *) warn "请输入 0-7。" ;;
+            *) warn "请输入 0-8。" ;;
         esac
     done
 }
@@ -980,6 +1043,7 @@ usage() {
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
   vless port <端口>     修改 VLESS 监听端口
+  vless ipv4           强制 IPv4 出站并阻止 IPv6 目标
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -988,7 +1052,7 @@ usage() {
 
 说明:
   安装完成后直接输入 vless 打开菜单。
-  修改 SNI、端口或 DNS 会先校验配置，通过后自动重启 Xray。
+  修改 SNI、端口、IPv4 出站或 DNS 会先校验配置，通过后自动重启 Xray。
 EOF
 }
 
@@ -1027,6 +1091,7 @@ dispatch() {
         qr) show_qr ;;
         sni|change-sni) shift; change_sni "${1:-}" ;;
         port|change-port) shift; change_port "${1:-}" ;;
+        ipv4|force-ipv4) force_ipv4_outbound ;;
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
