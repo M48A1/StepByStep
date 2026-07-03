@@ -24,7 +24,7 @@ FLOW="xtls-rprx-vision"
 FINGERPRINT="chrome"
 SPIDER_X="/"
 DEFAULT_DNS_1="1.1.1.1"
-DEFAULT_DNS_2="8.8.8.8"
+DEFAULT_DNS_2="1.0.0.1"
 
 trap 'echo -e "${RED}错误：第 ${LINENO} 行失败：${BASH_COMMAND}${NC}" >&2' ERR
 
@@ -116,7 +116,7 @@ ask_settings() {
     echo "  2. addons.mozilla.org"
     echo "  3. shopee.sg"
     echo "  4. www.apple.com"
-    echo "  5. www.cloudflare.com"
+    echo "  5. www.dell.com"
     echo "  6. 自定义"
     while true; do
         read -r -p "请选择 1-6: " choice
@@ -125,7 +125,7 @@ ask_settings() {
             2) SNI="addons.mozilla.org"; break ;;
             3) SNI="shopee.sg"; break ;;
             4) SNI="www.apple.com"; break ;;
-            5) SNI="www.cloudflare.com"; break ;;
+            5) SNI="www.dell.com"; break ;;
             6)
                 read -r -p "请输入 SNI 域名: " SNI
                 [[ "$SNI" =~ ^[A-Za-z0-9._-]+$ ]] || die "SNI 格式不正确。"
