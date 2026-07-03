@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.5"
+VERSION="2.4.8"
 BUILD_DATE="2026-07-03"
 
 set -Eeuo pipefail
@@ -551,7 +551,7 @@ change_sni() {
     fi
     validate_sni "$new_sni" || die "SNI 格式不正确。"
 
-    tmp_config=$(mktemp)
+    tmp_config=$(mktemp --suffix=.json)
     jq --arg sni "$new_sni" '
         (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target) = ($sni + ":443")
         | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
@@ -582,7 +582,7 @@ change_port() {
         return
     fi
 
-    tmp_config=$(mktemp)
+    tmp_config=$(mktemp --suffix=.json)
     jq --argjson port "$new_port" '
         (.inbounds[] | select(.protocol == "vless") | .port) = $port
     ' "$XRAY_CONFIG" >"$tmp_config"
@@ -597,31 +597,6 @@ change_port() {
     ok "端口已更新为：$new_port"
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
     warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
-}
-
-force_ipv4_outbound() {
-    require_root
-    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
-
-    local tmp_config log_path
-    tmp_config=$(mktemp)
-    log_path=$(mktemp)
-    jq '
-        .dns = (.dns // {})
-        | .dns.queryStrategy = "UseIPv4"
-        | (.outbounds[] | select(.protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
-    ' "$XRAY_CONFIG" >"$tmp_config"
-
-    if ! "$XRAY_BIN" -test -config "$tmp_config" >"$log_path" 2>&1; then
-        warn "Xray 配置校验失败，原始错误："
-        cat "$log_path" >&2 || true
-        rm -f "$tmp_config" "$log_path"
-        die "未修改当前配置。"
-    fi
-    mv "$tmp_config" "$XRAY_CONFIG"
-    rm -f "$log_path"
-    systemctl restart xray
-    ok "已强制 Xray 使用 IPv4 出站。"
 }
 
 change_dns() {
@@ -643,7 +618,7 @@ change_dns() {
     validate_dns_value "$dns1" || die "主 DNS 格式不正确。"
     validate_dns_value "$dns2" || die "备用 DNS 格式不正确。"
 
-    tmp_config=$(mktemp)
+    tmp_config=$(mktemp --suffix=.json)
     jq --arg dns1 "$dns1" --arg dns2 "$dns2" '
         .dns = {
             servers: [$dns1, $dns2],
@@ -676,10 +651,9 @@ manager_menu() {
         echo "2. 输出二维码"
         echo "3. 修改 SNI"
         echo "4. 修改端口"
-        echo "5. 强制 IPv4 出站"
-        echo "6. 修改 DNS"
-        echo "7. 重启 Xray"
-        echo "8. 查看 Xray 状态"
+        echo "5. 修改 DNS"
+        echo "6. 重启 Xray"
+        echo "7. 查看 Xray 状态"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -687,12 +661,11 @@ manager_menu() {
             2) show_qr ;;
             3) change_sni ;;
             4) change_port ;;
-            5) force_ipv4_outbound ;;
-            6) change_dns ;;
-            7) restart_service ;;
-            8) status_service ;;
+            5) change_dns ;;
+            6) restart_service ;;
+            7) status_service ;;
             0) exit 0 ;;
-            *) warn "请输入 0-8。" ;;
+            *) warn "请输入 0-7。" ;;
         esac
     done
 }
@@ -705,7 +678,6 @@ usage() {
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
   vless port <端口>     修改 VLESS 监听端口
-  vless ipv4           强制 IPv4 出站
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -722,7 +694,6 @@ dispatch() {
         qr) show_qr ;;
         sni|change-sni) shift; change_sni "${1:-}" ;;
         port|change-port) shift; change_port "${1:-}" ;;
-        ipv4|force-ipv4) force_ipv4_outbound ;;
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
@@ -878,7 +849,7 @@ change_sni() {
     fi
     validate_sni "$new_sni" || die "SNI 格式不正确。"
 
-    tmp_config=$(mktemp)
+    tmp_config=$(mktemp --suffix=.json)
     jq --arg sni "$new_sni" '
         (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target) = ($sni + ":443")
         | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
@@ -909,7 +880,7 @@ change_port() {
         return
     fi
 
-    tmp_config=$(mktemp)
+    tmp_config=$(mktemp --suffix=.json)
     jq --argjson port "$new_port" '
         (.inbounds[] | select(.protocol == "vless") | .port) = $port
     ' "$XRAY_CONFIG" >"$tmp_config"
@@ -924,31 +895,6 @@ change_port() {
     ok "端口已更新为：$new_port"
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
     warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
-}
-
-force_ipv4_outbound() {
-    require_root
-    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
-
-    local tmp_config log_path
-    tmp_config=$(mktemp)
-    log_path=$(mktemp)
-    jq '
-        .dns = (.dns // {})
-        | .dns.queryStrategy = "UseIPv4"
-        | (.outbounds[] | select(.protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
-    ' "$XRAY_CONFIG" >"$tmp_config"
-
-    if ! "$XRAY_BIN" -test -config "$tmp_config" >"$log_path" 2>&1; then
-        warn "Xray 配置校验失败，原始错误："
-        cat "$log_path" >&2 || true
-        rm -f "$tmp_config" "$log_path"
-        die "未修改当前配置。"
-    fi
-    mv "$tmp_config" "$XRAY_CONFIG"
-    rm -f "$log_path"
-    systemctl restart xray
-    ok "已强制 Xray 使用 IPv4 出站。"
 }
 
 validate_dns_value() {
@@ -976,7 +922,7 @@ change_dns() {
     validate_dns_value "$dns1" || die "主 DNS 格式不正确。"
     validate_dns_value "$dns2" || die "备用 DNS 格式不正确。"
 
-    tmp_config=$(mktemp)
+    tmp_config=$(mktemp --suffix=.json)
     jq --arg dns1 "$dns1" --arg dns2 "$dns2" '
         .dns = {
             servers: [$dns1, $dns2],
@@ -1009,10 +955,9 @@ manager_menu() {
         echo "2. 输出二维码"
         echo "3. 修改 SNI"
         echo "4. 修改端口"
-        echo "5. 强制 IPv4 出站"
-        echo "6. 修改 DNS"
-        echo "7. 重启 Xray"
-        echo "8. 查看 Xray 状态"
+        echo "5. 修改 DNS"
+        echo "6. 重启 Xray"
+        echo "7. 查看 Xray 状态"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -1020,12 +965,11 @@ manager_menu() {
             2) show_qr ;;
             3) change_sni ;;
             4) change_port ;;
-            5) force_ipv4_outbound ;;
-            6) change_dns ;;
-            7) restart_service ;;
-            8) status_service ;;
+            5) change_dns ;;
+            6) restart_service ;;
+            7) status_service ;;
             0) exit 0 ;;
-            *) warn "请输入 0-8。" ;;
+            *) warn "请输入 0-7。" ;;
         esac
     done
 }
@@ -1039,7 +983,6 @@ usage() {
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
   vless port <端口>     修改 VLESS 监听端口
-  vless ipv4           强制 IPv4 出站
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -1048,7 +991,7 @@ usage() {
 
 说明:
   安装完成后直接输入 vless 打开菜单。
-  修改 SNI、端口、IPv4 出站或 DNS 会先校验配置，通过后自动重启 Xray。
+  修改 SNI、端口或 DNS 会先校验配置，通过后自动重启 Xray。
 EOF
 }
 
@@ -1087,7 +1030,6 @@ dispatch() {
         qr) show_qr ;;
         sni|change-sni) shift; change_sni "${1:-}" ;;
         port|change-port) shift; change_port "${1:-}" ;;
-        ipv4|force-ipv4) force_ipv4_outbound ;;
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
