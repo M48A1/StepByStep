@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.2"
-BUILD_DATE="2026-07-02"
+VERSION="2.4.3"
+BUILD_DATE="2026-07-03"
 
 set -Eeuo pipefail
 
@@ -115,8 +115,8 @@ ask_settings() {
     echo "  1. download-installer.cdn.mozilla.net"
     echo "  2. addons.mozilla.org"
     echo "  3. shopee.sg"
-    echo "  4. www.apple.com"
-    echo "  5. www.dell.com"
+    echo "  4. www.dell.com"
+    echo "  5. www.cloudflare.com"
     echo "  6. 自定义"
     while true; do
         read -r -p "请选择 1-6: " choice
@@ -124,8 +124,8 @@ ask_settings() {
             1) SNI="download-installer.cdn.mozilla.net"; break ;;
             2) SNI="addons.mozilla.org"; break ;;
             3) SNI="shopee.sg"; break ;;
-            4) SNI="www.apple.com"; break ;;
-            5) SNI="www.dell.com"; break ;;
+            4) SNI="www.dell.com"; break ;;
+            5) SNI="www.cloudflare.com"; break ;;
             6)
                 read -r -p "请输入 SNI 域名: " SNI
                 [[ "$SNI" =~ ^[A-Za-z0-9._-]+$ ]] || die "SNI 格式不正确。"
@@ -415,6 +415,11 @@ validate_sni() {
     [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
 }
 
+validate_port() {
+    local value=$1
+    [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]
+}
+
 validate_dns_value() {
     local value=$1
     [[ "$value" =~ ^[A-Za-z0-9:._-]+$ ]]
@@ -557,6 +562,40 @@ change_sni() {
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
 }
 
+change_port() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local new_port old_port tmp_config
+    new_port=${1:-}
+    if [ -z "$new_port" ]; then
+        read -r -p "请输入新的监听端口: " new_port
+    fi
+    validate_port "$new_port" || die "端口必须是 1-65535 之间的数字。"
+
+    old_port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    if [ "$new_port" = "$old_port" ]; then
+        warn "新端口与当前端口相同，无需修改。"
+        return
+    fi
+
+    tmp_config=$(mktemp)
+    jq --argjson port "$new_port" '
+        (.inbounds[] | select(.protocol == "vless") | .port) = $port
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    mv "$tmp_config" "$XRAY_CONFIG"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${new_port}/tcp" >/dev/null 2>&1 || true
+    fi
+    systemctl restart xray
+    regenerate_client_info_from_config
+    ok "端口已更新为：$new_port"
+    ok "Xray 已重启，客户端信息和二维码已重新生成。"
+    warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
+}
+
 change_dns() {
     require_root
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
@@ -608,20 +647,22 @@ manager_menu() {
         echo "1. 查看节点信息"
         echo "2. 输出二维码"
         echo "3. 修改 SNI"
-        echo "4. 修改 DNS"
-        echo "5. 重启 Xray"
-        echo "6. 查看 Xray 状态"
+        echo "4. 修改端口"
+        echo "5. 修改 DNS"
+        echo "6. 重启 Xray"
+        echo "7. 查看 Xray 状态"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
             1) show_info ;;
             2) show_qr ;;
             3) change_sni ;;
-            4) change_dns ;;
-            5) restart_service ;;
-            6) status_service ;;
+            4) change_port ;;
+            5) change_dns ;;
+            6) restart_service ;;
+            7) status_service ;;
             0) exit 0 ;;
-            *) warn "请输入 0-6。" ;;
+            *) warn "请输入 0-7。" ;;
         esac
     done
 }
@@ -633,6 +674,7 @@ usage() {
   vless show           查看节点信息
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
+  vless port <端口>     修改 VLESS 监听端口
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -648,6 +690,7 @@ dispatch() {
         show) show_info ;;
         qr) show_qr ;;
         sni|change-sni) shift; change_sni "${1:-}" ;;
+        port|change-port) shift; change_port "${1:-}" ;;
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
@@ -668,6 +711,11 @@ VLESS_MANAGER_EOF
 validate_sni() {
     local value=$1
     [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+}
+
+validate_port() {
+    local value=$1
+    [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge 1 ] && [ "$value" -le 65535 ]
 }
 
 public_key_from_private() {
@@ -812,6 +860,40 @@ change_sni() {
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
 }
 
+change_port() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local new_port old_port tmp_config
+    new_port=${1:-}
+    if [ -z "$new_port" ]; then
+        read -r -p "请输入新的监听端口: " new_port
+    fi
+    validate_port "$new_port" || die "端口必须是 1-65535 之间的数字。"
+
+    old_port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    if [ "$new_port" = "$old_port" ]; then
+        warn "新端口与当前端口相同，无需修改。"
+        return
+    fi
+
+    tmp_config=$(mktemp)
+    jq --argjson port "$new_port" '
+        (.inbounds[] | select(.protocol == "vless") | .port) = $port
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    mv "$tmp_config" "$XRAY_CONFIG"
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${new_port}/tcp" >/dev/null 2>&1 || true
+    fi
+    systemctl restart xray
+    regenerate_client_info_from_config
+    ok "端口已更新为：$new_port"
+    ok "Xray 已重启，客户端信息和二维码已重新生成。"
+    warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
+}
+
 validate_dns_value() {
     local value=$1
     [[ "$value" =~ ^[A-Za-z0-9:._-]+$ ]]
@@ -869,20 +951,22 @@ manager_menu() {
         echo "1. 查看节点信息"
         echo "2. 输出二维码"
         echo "3. 修改 SNI"
-        echo "4. 修改 DNS"
-        echo "5. 重启 Xray"
-        echo "6. 查看 Xray 状态"
+        echo "4. 修改端口"
+        echo "5. 修改 DNS"
+        echo "6. 重启 Xray"
+        echo "7. 查看 Xray 状态"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
             1) show_info ;;
             2) show_qr ;;
             3) change_sni ;;
-            4) change_dns ;;
-            5) restart_service ;;
-            6) status_service ;;
+            4) change_port ;;
+            5) change_dns ;;
+            6) restart_service ;;
+            7) status_service ;;
             0) exit 0 ;;
-            *) warn "请输入 0-6。" ;;
+            *) warn "请输入 0-7。" ;;
         esac
     done
 }
@@ -895,6 +979,7 @@ usage() {
   vless show           查看节点信息
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
+  vless port <端口>     修改 VLESS 监听端口
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -903,7 +988,7 @@ usage() {
 
 说明:
   安装完成后直接输入 vless 打开菜单。
-  修改 SNI 或 DNS 会先校验配置，通过后自动重启 Xray。
+  修改 SNI、端口或 DNS 会先校验配置，通过后自动重启 Xray。
 EOF
 }
 
@@ -941,6 +1026,7 @@ dispatch() {
         show) show_info ;;
         qr) show_qr ;;
         sni|change-sni) shift; change_sni "${1:-}" ;;
+        port|change-port) shift; change_port "${1:-}" ;;
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
