@@ -114,7 +114,7 @@ ask_settings() {
     echo "选择 REALITY 伪装目标 SNI："
     echo "  1. download-installer.cdn.mozilla.net"
     echo "  2. addons.mozilla.org"
-    echo "  3. www.microsoft.com"
+    echo "  3. shopee.sg"
     echo "  4. www.apple.com"
     echo "  5. www.cloudflare.com"
     echo "  6. 自定义"
@@ -123,7 +123,7 @@ ask_settings() {
         case "$choice" in
             1) SNI="download-installer.cdn.mozilla.net"; break ;;
             2) SNI="addons.mozilla.org"; break ;;
-            3) SNI="www.microsoft.com"; break ;;
+            3) SNI="shopee.sg"; break ;;
             4) SNI="www.apple.com"; break ;;
             5) SNI="www.cloudflare.com"; break ;;
             6)
