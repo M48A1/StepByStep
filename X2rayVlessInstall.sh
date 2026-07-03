@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.4"
+VERSION="2.4.5"
 BUILD_DATE="2026-07-03"
 
 set -Eeuo pipefail
@@ -222,16 +222,6 @@ write_config() {
                     }
                 }
             ],
-            routing: {
-                domainStrategy: "IPIfNonMatch",
-                rules: [
-                    {
-                        type: "field",
-                        ip: ["::/0"],
-                        outboundTag: "block"
-                    }
-                ]
-            },
             outbounds: [
                 {
                     tag: "direct",
@@ -613,22 +603,25 @@ force_ipv4_outbound() {
     require_root
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
-    local tmp_config
+    local tmp_config log_path
     tmp_config=$(mktemp)
+    log_path=$(mktemp)
     jq '
-        (.outbounds[] | select(.tag == "direct" and .protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
-        | .routing = (.routing // {})
-        | .routing.domainStrategy = "IPIfNonMatch"
-        | .routing.rules = (
-            [.routing.rules[]? | select(.outboundTag != "block" or (((.ip // []) | index("::/0")) | not))]
-            + [{type: "field", ip: ["::/0"], outboundTag: "block"}]
-        )
+        .dns = (.dns // {})
+        | .dns.queryStrategy = "UseIPv4"
+        | (.outbounds[] | select(.protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    if ! "$XRAY_BIN" -test -config "$tmp_config" >"$log_path" 2>&1; then
+        warn "Xray 配置校验失败，原始错误："
+        cat "$log_path" >&2 || true
+        rm -f "$tmp_config" "$log_path"
+        die "未修改当前配置。"
+    fi
     mv "$tmp_config" "$XRAY_CONFIG"
+    rm -f "$log_path"
     systemctl restart xray
-    ok "已强制 Xray 使用 IPv4 出站，并阻止 IPv6 目标。"
+    ok "已强制 Xray 使用 IPv4 出站。"
 }
 
 change_dns() {
@@ -712,7 +705,7 @@ usage() {
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
   vless port <端口>     修改 VLESS 监听端口
-  vless ipv4           强制 IPv4 出站并阻止 IPv6 目标
+  vless ipv4           强制 IPv4 出站
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
@@ -937,22 +930,25 @@ force_ipv4_outbound() {
     require_root
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
-    local tmp_config
+    local tmp_config log_path
     tmp_config=$(mktemp)
+    log_path=$(mktemp)
     jq '
-        (.outbounds[] | select(.tag == "direct" and .protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
-        | .routing = (.routing // {})
-        | .routing.domainStrategy = "IPIfNonMatch"
-        | .routing.rules = (
-            [.routing.rules[]? | select(.outboundTag != "block" or (((.ip // []) | index("::/0")) | not))]
-            + [{type: "field", ip: ["::/0"], outboundTag: "block"}]
-        )
+        .dns = (.dns // {})
+        | .dns.queryStrategy = "UseIPv4"
+        | (.outbounds[] | select(.protocol == "freedom") | .settings.domainStrategy) = "UseIPv4"
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    if ! "$XRAY_BIN" -test -config "$tmp_config" >"$log_path" 2>&1; then
+        warn "Xray 配置校验失败，原始错误："
+        cat "$log_path" >&2 || true
+        rm -f "$tmp_config" "$log_path"
+        die "未修改当前配置。"
+    fi
     mv "$tmp_config" "$XRAY_CONFIG"
+    rm -f "$log_path"
     systemctl restart xray
-    ok "已强制 Xray 使用 IPv4 出站，并阻止 IPv6 目标。"
+    ok "已强制 Xray 使用 IPv4 出站。"
 }
 
 validate_dns_value() {
@@ -1043,7 +1039,7 @@ usage() {
   vless qr             输出二维码
   vless sni <domain>   修改 SNI
   vless port <端口>     修改 VLESS 监听端口
-  vless ipv4           强制 IPv4 出站并阻止 IPv6 目标
+  vless ipv4           强制 IPv4 出站
   vless dns <主DNS> <备用DNS>
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
