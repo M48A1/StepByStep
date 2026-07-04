@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.8"
-BUILD_DATE="2026-07-03"
+VERSION="2.4.11"
+BUILD_DATE="2026-07-04"
 
 set -Eeuo pipefail
 
@@ -53,7 +53,7 @@ check_os() {
 install_dependencies() {
     info "安装依赖..."
     apt-get update -qq
-    apt-get install -y curl jq openssl iproute2 ca-certificates qrencode ufw
+    apt-get install -y curl jq openssl iproute2 ca-certificates qrencode
 }
 
 remove_old_config() {
@@ -112,26 +112,22 @@ ask_settings() {
     [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "端口必须在 1-65535 之间。"
 
     echo "选择 REALITY 伪装目标 SNI："
-    echo "  1. download-installer.cdn.mozilla.net"
-    echo "  2. addons.mozilla.org"
+    echo "  1. www.dell.com"
+    echo "  2. www.amazon.co.jp"
     echo "  3. shopee.sg"
-    echo "  4. www.dell.com"
-    echo "  5. www.cloudflare.com"
-    echo "  6. 自定义"
+    echo "  4. 自定义"
     while true; do
-        read -r -p "请选择 1-6: " choice
+        read -r -p "请选择 1-4: " choice
         case "$choice" in
-            1) SNI="download-installer.cdn.mozilla.net"; break ;;
-            2) SNI="addons.mozilla.org"; break ;;
+            1) SNI="www.dell.com"; break ;;
+            2) SNI="www.amazon.co.jp"; break ;;
             3) SNI="shopee.sg"; break ;;
-            4) SNI="www.dell.com"; break ;;
-            5) SNI="www.cloudflare.com"; break ;;
-            6)
+            4)
                 read -r -p "请输入 SNI 域名: " SNI
                 [[ "$SNI" =~ ^[A-Za-z0-9._-]+$ ]] || die "SNI 格式不正确。"
                 break
                 ;;
-            *) warn "请输入 1-6。" ;;
+            *) warn "请输入 1-4。" ;;
         esac
     done
 
@@ -160,6 +156,20 @@ xray_user() {
     local user
     user=$(systemctl show -p User --value xray 2>/dev/null | tr -d '[:space:]')
     echo "${user:-root}"
+}
+
+test_xray_config() {
+    local config_path=$1 log_path
+    log_path=$(mktemp)
+
+    if ! "$XRAY_BIN" -test -config "$config_path" >"$log_path" 2>&1; then
+        warn "Xray 配置校验失败，原始输出："
+        cat "$log_path" >&2 || true
+        rm -f "$log_path"
+        return 1
+    fi
+
+    rm -f "$log_path"
 }
 
 write_config() {
@@ -208,7 +218,7 @@ write_config() {
                         security: "reality",
                         realitySettings: {
                             show: false,
-                            target: ($sni + ":443"),
+                            dest: ($sni + ":443"),
                             xver: 0,
                             serverNames: [$sni],
                             privateKey: $privateKey,
@@ -246,24 +256,8 @@ write_config() {
         chown -R "$user":"$user" "$XRAY_LOG_DIR" 2>/dev/null || chown -R "$user":nogroup "$XRAY_LOG_DIR" 2>/dev/null || true
     fi
 
-    "$XRAY_BIN" -test -config "$XRAY_CONFIG" >/dev/null
+    test_xray_config "$XRAY_CONFIG" || die "配置校验失败。"
     ok "配置校验通过。"
-}
-
-open_firewall() {
-    info "放行防火墙端口..."
-    if command -v ufw >/dev/null 2>&1; then
-        local ssh_port
-        ssh_port=$(ss -tlnp 2>/dev/null | awk '/sshd/ {print $4}' | awk -F':' '{print $NF}' | head -n 1)
-        ssh_port=${ssh_port:-22}
-        ufw allow "${ssh_port}/tcp" >/dev/null 2>&1 || true
-        ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
-        if ufw status 2>/dev/null | grep -q "Status: active"; then
-            ok "UFW 已放行 ${PORT}/tcp。"
-        else
-            warn "UFW 未启用。请确认 VPS 服务商安全组已放行 ${PORT}/tcp。"
-        fi
-    fi
 }
 
 enable_bbr() {
@@ -305,7 +299,7 @@ get_public_ip() {
 print_result() {
     local encoded_name link
     encoded_name=$(printf '%s' "$NODE_NAME" | jq -sRr @uri)
-    link="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&flow=${FLOW}&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=%2F#${encoded_name}"
+    link="vless://${UUID}@${SERVER_IP}:${PORT}?type=tcp&security=reality&encryption=none&flow=${FLOW}&pbk=${PUBLIC_KEY}&fp=${FINGERPRINT}&sni=${SNI}&sid=${SHORT_ID}&spx=%2F#${encoded_name}"
 
     cat >"$XRAY_INFO" <<EOF
 节点名称: ${NODE_NAME}
@@ -444,6 +438,52 @@ saved_server_ip() {
     fi
 }
 
+test_xray_config() {
+    local config_path=$1 log_path
+    log_path=$(mktemp)
+
+    if ! "$XRAY_BIN" -test -config "$config_path" >"$log_path" 2>&1; then
+        warn "Xray 配置校验失败，原始输出："
+        cat "$log_path" >&2 || true
+        rm -f "$log_path"
+        return 1
+    fi
+
+    rm -f "$log_path"
+}
+
+repair_reality_config() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local old_target old_sni tmp_config
+    old_target=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target][0] // empty' "$XRAY_CONFIG")
+    if [ -z "$old_target" ]; then
+        test_xray_config "$XRAY_CONFIG" || die "当前配置校验失败。"
+        regenerate_client_info_from_config
+        ok "未发现旧字段 target，已重新生成客户端信息和二维码。"
+        return
+    fi
+    old_sni=${old_target%:*}
+
+    tmp_config=$(mktemp --suffix=.json)
+    jq --arg oldTarget "$old_target" --arg oldSni "$old_sni" '
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.dest) = $oldTarget
+        | del(.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target)
+        | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$oldSni]
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "修复后的配置校验失败，未覆盖原配置。"
+    fi
+    mv "$tmp_config" "$XRAY_CONFIG"
+    systemctl restart xray
+    regenerate_client_info_from_config
+    ok "Reality 配置已修复：target -> dest"
+    ok "Xray 已重启，客户端信息和二维码已重新生成。"
+}
+
 regenerate_client_info_from_config() {
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
@@ -479,7 +519,7 @@ regenerate_client_info_from_config() {
     [ -n "$server_ip" ] || die "服务器 IP 不能为空。"
 
     encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
-    link="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=${flow}&pbk=${public_key}&fp=${FINGERPRINT}&sni=${sni}&sid=${short_id}&spx=%2F#${encoded_name}"
+    link="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&encryption=none&flow=${flow}&pbk=${public_key}&fp=${FINGERPRINT}&sni=${sni}&sid=${short_id}&spx=%2F#${encoded_name}"
 
     cat >"$XRAY_INFO" <<EOF
 节点名称: ${node_name}
@@ -553,11 +593,15 @@ change_sni() {
 
     tmp_config=$(mktemp --suffix=.json)
     jq --arg sni "$new_sni" '
-        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target) = ($sni + ":443")
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.dest) = ($sni + ":443")
+        | del(.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target)
         | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "新 SNI 配置校验失败，未覆盖原配置。"
+    fi
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -587,16 +631,15 @@ change_port() {
         (.inbounds[] | select(.protocol == "vless") | .port) = $port
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
-    mv "$tmp_config" "$XRAY_CONFIG"
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow "${new_port}/tcp" >/dev/null 2>&1 || true
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "新端口配置校验失败，未覆盖原配置。"
     fi
+    mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
     ok "端口已更新为：$new_port"
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
-    warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
 }
 
 change_dns() {
@@ -626,7 +669,10 @@ change_dns() {
         }
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "新 DNS 配置校验失败，未覆盖原配置。"
+    fi
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     ok "DNS 已更新为：$dns1, $dns2"
@@ -654,6 +700,7 @@ manager_menu() {
         echo "5. 修改 DNS"
         echo "6. 重启 Xray"
         echo "7. 查看 Xray 状态"
+        echo "8. 修复 Reality 配置"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -664,8 +711,9 @@ manager_menu() {
             5) change_dns ;;
             6) restart_service ;;
             7) status_service ;;
+            8) repair_reality_config ;;
             0) exit 0 ;;
-            *) warn "请输入 0-7。" ;;
+            *) warn "请输入 0-8。" ;;
         esac
     done
 }
@@ -682,6 +730,7 @@ usage() {
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
   vless status         查看状态
+  vless repair         修复旧版 Reality 配置 target 字段
 EOF
 }
 
@@ -697,6 +746,7 @@ dispatch() {
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
+        repair) repair_reality_config ;;
         help|-h|--help) usage ;;
         *) usage; exit 1 ;;
     esac
@@ -737,6 +787,38 @@ saved_server_ip() {
     fi
 }
 
+repair_reality_config() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+
+    local old_target old_sni tmp_config
+    old_target=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target][0] // empty' "$XRAY_CONFIG")
+    if [ -z "$old_target" ]; then
+        test_xray_config "$XRAY_CONFIG" || die "当前配置校验失败。"
+        regenerate_client_info_from_config
+        ok "未发现旧字段 target，已重新生成客户端信息和二维码。"
+        return
+    fi
+    old_sni=${old_target%:*}
+
+    tmp_config=$(mktemp --suffix=.json)
+    jq --arg oldTarget "$old_target" --arg oldSni "$old_sni" '
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.dest) = $oldTarget
+        | del(.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target)
+        | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$oldSni]
+    ' "$XRAY_CONFIG" >"$tmp_config"
+
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "修复后的配置校验失败，未覆盖原配置。"
+    fi
+    mv "$tmp_config" "$XRAY_CONFIG"
+    systemctl restart xray
+    regenerate_client_info_from_config
+    ok "Reality 配置已修复：target -> dest"
+    ok "Xray 已重启，客户端信息和二维码已重新生成。"
+}
+
 regenerate_client_info_from_config() {
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
@@ -772,7 +854,7 @@ regenerate_client_info_from_config() {
     [ -n "$server_ip" ] || die "服务器 IP 不能为空。"
 
     encoded_name=$(printf '%s' "$node_name" | jq -sRr @uri)
-    link="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&flow=${flow}&pbk=${public_key}&fp=${FINGERPRINT}&sni=${sni}&sid=${short_id}&spx=%2F#${encoded_name}"
+    link="vless://${uuid}@${server_ip}:${port}?type=tcp&security=reality&encryption=none&flow=${flow}&pbk=${public_key}&fp=${FINGERPRINT}&sni=${sni}&sid=${short_id}&spx=%2F#${encoded_name}"
 
     cat >"$XRAY_INFO" <<EOF
 节点名称: ${node_name}
@@ -851,11 +933,15 @@ change_sni() {
 
     tmp_config=$(mktemp --suffix=.json)
     jq --arg sni "$new_sni" '
-        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target) = ($sni + ":443")
+        (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.dest) = ($sni + ":443")
+        | del(.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target)
         | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "新 SNI 配置校验失败，未覆盖原配置。"
+    fi
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -885,16 +971,15 @@ change_port() {
         (.inbounds[] | select(.protocol == "vless") | .port) = $port
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
-    mv "$tmp_config" "$XRAY_CONFIG"
-    if command -v ufw >/dev/null 2>&1; then
-        ufw allow "${new_port}/tcp" >/dev/null 2>&1 || true
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "新端口配置校验失败，未覆盖原配置。"
     fi
+    mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
     ok "端口已更新为：$new_port"
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
-    warn "请确认 VPS 服务商安全组已放行 ${new_port}/tcp。"
 }
 
 validate_dns_value() {
@@ -930,7 +1015,10 @@ change_dns() {
         }
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    "$XRAY_BIN" -test -config "$tmp_config" >/dev/null
+    if ! test_xray_config "$tmp_config"; then
+        rm -f "$tmp_config"
+        die "新 DNS 配置校验失败，未覆盖原配置。"
+    fi
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     ok "DNS 已更新为：$dns1, $dns2"
@@ -958,6 +1046,7 @@ manager_menu() {
         echo "5. 修改 DNS"
         echo "6. 重启 Xray"
         echo "7. 查看 Xray 状态"
+        echo "8. 修复 Reality 配置"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -968,8 +1057,9 @@ manager_menu() {
             5) change_dns ;;
             6) restart_service ;;
             7) status_service ;;
+            8) repair_reality_config ;;
             0) exit 0 ;;
-            *) warn "请输入 0-7。" ;;
+            *) warn "请输入 0-8。" ;;
         esac
     done
 }
@@ -987,6 +1077,8 @@ usage() {
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
   vless status         查看状态
+  vless repair         修复旧版 Reality 配置 target 字段
+  vless update-manager 更新 vless 管理命令，不重装节点
   vless install        重新安装
 
 说明:
@@ -1005,7 +1097,6 @@ main() {
     ask_settings
     generate_values
     write_config
-    open_firewall
     enable_bbr
     restart_xray
     get_public_ip
@@ -1033,6 +1124,8 @@ dispatch() {
         dns|change-dns) shift; change_dns "${1:-}" "${2:-}" ;;
         restart) restart_service ;;
         status) status_service ;;
+        repair) repair_reality_config ;;
+        update-manager|update) require_root; install_manager_command ;;
         help|-h|--help) usage ;;
         *) usage; exit 1 ;;
     esac
