@@ -168,6 +168,30 @@ save_node() {
   chmod 600 "$INFO_FILE" "$LINK_FILE"
 }
 
+install_manager() {
+  local temp_manager
+  temp_manager="$(mktemp /tmp/vless-manager.XXXXXX)"
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail'
+    printf 'readonly VERSION=%q\n' "$VERSION"
+    printf 'readonly CONF_DIR=%q\n' "$CONF_DIR"
+    printf 'readonly CONF_FILE=%q\n' "$CONF_FILE"
+    printf 'readonly INFO_FILE=%q\n' "$INFO_FILE"
+    printf 'readonly LINK_FILE=%q\n' "$LINK_FILE"
+    printf 'readonly SYSCTL_FILE=%q\n' "$SYSCTL_FILE"
+    printf 'readonly MANAGER=%q\n' "$MANAGER"
+    printf '%s\n' 'PORT=443' 'PORT_EXPLICIT=0' 'SNI="www.dell.com"' 'SNI_EXPLICIT=0'
+    declare -f say ok warn die need_root valid_port valid_sni \
+      choose_port choose_sni install_deps install_singbox disable_ipv6 \
+      public_ipv4 generate_keys write_config check_config save_node \
+      show_node install_manager install_node uninstall_node status_node \
+      usage parse_args main_menu main
+    printf '%s\n' 'main "$@"'
+  } >"$temp_manager"
+  install -m 755 "$temp_manager" "$MANAGER"
+  rm -f "$temp_manager"
+}
+
 show_node() {
   [[ -s "$INFO_FILE" && -s "$LINK_FILE" ]] || die "节点尚未安装"
   # shellcheck disable=SC1090
@@ -188,7 +212,7 @@ install_node() {
   install_deps; install_singbox
   if ss -H -ltn "sport = :$PORT" 2>/dev/null | grep -q .; then die "TCP 端口 $PORT 已被占用"; fi
   disable_ipv6; generate_keys; write_config; check_config; save_node
-  install -m 755 "$(readlink -f "$0")" "$MANAGER"
+  install_manager
   systemctl daemon-reload
   systemctl enable sing-box >/dev/null
   systemctl restart sing-box
