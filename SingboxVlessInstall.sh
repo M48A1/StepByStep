@@ -11,6 +11,7 @@ readonly SYSCTL_FILE="/etc/sysctl.d/99-sing-box-ipv4-only.conf"
 readonly MANAGER="/usr/local/bin/vless"
 
 PORT=443
+PORT_EXPLICIT=0
 SNI="www.dell.com"
 SNI_EXPLICIT=0
 
@@ -22,6 +23,29 @@ die() { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; exit 1; }
 need_root() { [[ $EUID -eq 0 ]] || die "请用 root 运行：sudo bash $0 $*"; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)) || die "端口必须为 1-65535"; }
 valid_sni() { [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "SNI 格式不正确：$1"; }
+
+choose_port() {
+  ((PORT_EXPLICIT == 0)) || return
+  if [[ ! -t 0 ]]; then
+    say "非交互运行，默认使用端口：$PORT"
+    return
+  fi
+  printf '\n请选择 VLESS 监听端口：\n'
+  printf '  1) 443（默认）\n'
+  printf '  2) 8443\n'
+  printf '  3) 自定义端口\n'
+  read -r -p '请输入选项 [1-3，默认 1]：' choice
+  case "${choice:-1}" in
+    1) PORT=443 ;;
+    2) PORT=8443 ;;
+    3)
+      read -r -p '请输入端口 [1-65535]：' PORT
+      valid_port "$PORT"
+      ;;
+    *) die "无效的端口选项：$choice" ;;
+  esac
+  say "已选择端口：$PORT"
+}
 
 choose_sni() {
   ((SNI_EXPLICIT == 0)) || return
@@ -158,6 +182,7 @@ show_node() {
 install_node() {
   need_root install
   command -v systemctl >/dev/null || die "系统不支持 systemd"
+  choose_port
   choose_sni
   valid_port "$PORT"; valid_sni "$SNI"
   install_deps; install_singbox
@@ -201,6 +226,8 @@ sing-box VLESS Reality 纯 IPv4 一键脚本 v$VERSION
 
 安装：bash install.sh install [--port 443] [--sni 域名]
 
+也可以直接运行 bash install.sh 打开交互菜单。
+
 交互安装时可选择：
   1) Dell：www.dell.com
   2) 新加坡虾皮：shopee.sg
@@ -210,6 +237,7 @@ sing-box VLESS Reality 纯 IPv4 一键脚本 v$VERSION
   bash install.sh install --sni shopee.sg
 
 管理：
+  vless            打开交互管理菜单
   vless show       显示链接和二维码
   vless status     查看服务和 IPv6 状态
   vless restart    重启服务
@@ -225,17 +253,45 @@ EOF
 parse_args() {
   while (($#)); do
     case "$1" in
-      --port) [[ $# -ge 2 ]] || die "--port 缺少值"; PORT="$2"; shift 2 ;;
+      --port) [[ $# -ge 2 ]] || die "--port 缺少值"; PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
       --sni) [[ $# -ge 2 ]] || die "--sni 缺少值"; SNI="$2"; SNI_EXPLICIT=1; shift 2 ;;
       *) die "未知参数：$1" ;;
     esac
   done
 }
 
+main_menu() {
+  [[ -t 0 ]] || { usage; return; }
+  while true; do
+    printf '\n========================================\n'
+    printf ' sing-box VLESS Reality 管理菜单\n'
+    printf '========================================\n'
+    printf '  1) 安装 VLESS Reality\n'
+    printf '  2) 显示节点信息\n'
+    printf '  3) 查看运行状态\n'
+    printf '  4) 重启 sing-box\n'
+    printf '  5) 查看实时日志\n'
+    printf '  6) 卸载节点\n'
+    printf '  0) 退出\n'
+    read -r -p '请选择 [0-6]：' choice
+    case "$choice" in
+      1) install_node; return ;;
+      2) show_node ;;
+      3) status_node ;;
+      4) need_root restart; systemctl restart sing-box; ok "sing-box 已重启" ;;
+      5) printf '按 Ctrl+C 退出日志。\n'; journalctl -u sing-box --output cat -f ;;
+      6) uninstall_node; return ;;
+      0) return ;;
+      *) warn "无效选项，请重新选择" ;;
+    esac
+  done
+}
+
 main() {
-  local cmd="${1:-help}"
+  local cmd="${1:-menu}"
   (($# == 0)) || shift
   case "$cmd" in
+    menu) main_menu ;;
     install) parse_args "$@"; install_node ;;
     show) show_node ;;
     status) status_node ;;
