@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Version: 1.1.0
+# Version: 1.2.0
 set -Eeuo pipefail
 
 # sing-box VLESS Reality IPv4-only 一键安装脚本
-readonly VERSION="1.1.0"
+readonly VERSION="1.2.0"
 readonly CONF_DIR="/etc/sing-box"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly INFO_FILE="${CONF_DIR}/vless-info.env"
@@ -15,6 +15,8 @@ PORT=443
 PORT_EXPLICIT=0
 SNI="www.dell.com"
 SNI_EXPLICIT=0
+NODE_NAME=""
+NAME_EXPLICIT=0
 
 say() { printf '\033[1;34m[信息]\033[0m %s\n' "$*"; }
 ok() { printf '\033[1;32m[完成]\033[0m %s\n' "$*"; }
@@ -24,6 +26,37 @@ die() { printf '\033[1;31m[错误]\033[0m %s\n' "$*" >&2; exit 1; }
 need_root() { [[ $EUID -eq 0 ]] || die "请用 root 运行：sudo bash $0 $*"; }
 valid_port() { [[ "$1" =~ ^[0-9]+$ ]] && ((10#$1 >= 1 && 10#$1 <= 65535)) || die "端口必须为 1-65535"; }
 valid_sni() { [[ "$1" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$ ]] || die "SNI 格式不正确：$1"; }
+valid_name() {
+  [[ "$1" != *$'\n'* && "$1" != *$'\r'* && ${#1} -le 64 ]] || die "节点名称不能换行，且不能超过 64 个字符"
+}
+
+remove_existing_singbox() {
+  local found=0 answer=""
+  command -v sing-box >/dev/null 2>&1 && found=1
+  [[ -e "$CONF_DIR" ]] && found=1
+  systemctl cat sing-box.service >/dev/null 2>&1 && found=1
+  ((found == 1)) || return
+
+  warn "检测到现有 sing-box 程序、服务或配置"
+  if [[ ! -t 0 ]]; then
+    die "非交互运行不会自动删除现有 sing-box；请先运行 vless uninstall，或在终端中交互安装"
+  fi
+  read -r -p '是否删除现有 sing-box 后重新安装？[y/N]：' answer
+  [[ "$answer" =~ ^[Yy]$ ]] || die "已取消安装，现有 sing-box 未改动"
+
+  systemctl disable --now sing-box >/dev/null 2>&1 || true
+  rm -rf "$CONF_DIR"
+  rm -f "$MANAGER"
+  if command -v dpkg >/dev/null 2>&1 && dpkg -s sing-box >/dev/null 2>&1; then
+    apt-get remove -y sing-box
+  elif command -v rpm >/dev/null 2>&1 && rpm -q sing-box >/dev/null 2>&1; then
+    if command -v dnf >/dev/null 2>&1; then dnf remove -y sing-box; else yum remove -y sing-box; fi
+  else
+    rm -f /usr/local/bin/sing-box /usr/bin/sing-box
+  fi
+  systemctl daemon-reload
+  ok "现有 sing-box 已删除"
+}
 
 choose_port() {
   ((PORT_EXPLICIT == 0)) || return
@@ -69,6 +102,18 @@ choose_sni() {
     *) die "无效的 SNI 选项：$choice" ;;
   esac
   say "已选择 SNI：$SNI"
+}
+
+choose_node_name() {
+  ((NAME_EXPLICIT == 0)) || { valid_name "$NODE_NAME"; return; }
+  if [[ ! -t 0 ]]; then
+    say "非交互运行，节点名称将自动生成"
+    return
+  fi
+  printf '\n请设置节点名称。\n'
+  read -r -p '节点名称（留空自动生成）：' NODE_NAME
+  valid_name "$NODE_NAME"
+  [[ -z "$NODE_NAME" ]] || say "节点名称：$NODE_NAME"
 }
 
 install_deps() {
@@ -155,8 +200,10 @@ check_config() {
 
 save_node() {
   SERVER_IPV4="$(public_ipv4)"
-  local link
-  link="vless://${UUID}@${SERVER_IPV4}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#sing-box-${SERVER_IPV4}"
+  local link encoded_name
+  [[ -n "$NODE_NAME" ]] || NODE_NAME="sing-box-${SERVER_IPV4}"
+  encoded_name="$(jq -rn --arg name "$NODE_NAME" '$name | @uri')"
+  link="vless://${UUID}@${SERVER_IPV4}:${PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp#${encoded_name}"
   {
     printf 'SERVER_IPV4=%q\n' "$SERVER_IPV4"
     printf 'PORT=%q\n' "$PORT"
@@ -164,6 +211,7 @@ save_node() {
     printf 'SNI=%q\n' "$SNI"
     printf 'PUBLIC_KEY=%q\n' "$PUBLIC_KEY"
     printf 'SHORT_ID=%q\n' "$SHORT_ID"
+    printf 'NODE_NAME=%q\n' "$NODE_NAME"
   } >"$INFO_FILE"
   printf '%s\n' "$link" >"$LINK_FILE"
   chmod 600 "$INFO_FILE" "$LINK_FILE"
@@ -181,9 +229,9 @@ install_manager() {
     printf 'readonly LINK_FILE=%q\n' "$LINK_FILE"
     printf 'readonly SYSCTL_FILE=%q\n' "$SYSCTL_FILE"
     printf 'readonly MANAGER=%q\n' "$MANAGER"
-    printf '%s\n' 'PORT=443' 'PORT_EXPLICIT=0' 'SNI="www.dell.com"' 'SNI_EXPLICIT=0'
-    declare -f say ok warn die need_root valid_port valid_sni \
-      choose_port choose_sni install_deps install_singbox disable_ipv6 \
+    printf '%s\n' 'PORT=443' 'PORT_EXPLICIT=0' 'SNI="www.dell.com"' 'SNI_EXPLICIT=0' 'NODE_NAME=""' 'NAME_EXPLICIT=0'
+    declare -f say ok warn die need_root valid_port valid_sni valid_name \
+      remove_existing_singbox choose_port choose_sni choose_node_name install_deps install_singbox disable_ipv6 \
       public_ipv4 generate_keys write_config check_config save_node \
       show_node install_manager install_node uninstall_node status_node \
       usage parse_args main_menu main
@@ -197,8 +245,8 @@ show_node() {
   [[ -s "$INFO_FILE" && -s "$LINK_FILE" ]] || die "节点尚未安装"
   # shellcheck disable=SC1090
   source "$INFO_FILE"
-  printf '\n服务器 IPv4 : %s\n端口          : %s\nUUID          : %s\nSNI           : %s\n公钥          : %s\nShort ID      : %s\n\n节点链接：\n' \
-    "$SERVER_IPV4" "$PORT" "$UUID" "$SNI" "$PUBLIC_KEY" "$SHORT_ID"
+  printf '\n节点名称      : %s\n服务器 IPv4 : %s\n端口          : %s\nUUID          : %s\nSNI           : %s\n公钥          : %s\nShort ID      : %s\n\n节点链接：\n' \
+    "${NODE_NAME:-未记录}" "$SERVER_IPV4" "$PORT" "$UUID" "$SNI" "$PUBLIC_KEY" "$SHORT_ID"
   cat "$LINK_FILE"
   if [[ -t 1 ]] && command -v qrencode >/dev/null; then printf '\n'; qrencode -t ANSIUTF8 <"$LINK_FILE"; fi
   printf '\n管理命令：vless\n配置文件：%s\n' "$CONF_FILE"
@@ -207,8 +255,10 @@ show_node() {
 install_node() {
   need_root install
   command -v systemctl >/dev/null || die "系统不支持 systemd"
+  remove_existing_singbox
   choose_port
   choose_sni
+  choose_node_name
   valid_port "$PORT"; valid_sni "$SNI"
   install_deps; install_singbox
   if ss -H -ltn "sport = :$PORT" 2>/dev/null | grep -q .; then die "TCP 端口 $PORT 已被占用"; fi
@@ -249,7 +299,7 @@ usage() {
   cat <<EOF
 sing-box VLESS Reality 纯 IPv4 一键脚本 v$VERSION
 
-安装：bash install.sh install [--port 443] [--sni 域名]
+安装：bash install.sh install [--port 443] [--sni 域名] [--name 节点名称]
 
 也可以直接运行 bash install.sh 打开交互菜单。
 
@@ -259,7 +309,7 @@ sing-box VLESS Reality 纯 IPv4 一键脚本 v$VERSION
   3) 自定义 SNI
 
 使用 --sni 可跳过交互选择，例如：
-  bash install.sh install --sni shopee.sg
+  bash install.sh install --sni shopee.sg --name 新加坡节点
 
 管理：
   vless            打开交互管理菜单
@@ -280,6 +330,7 @@ parse_args() {
     case "$1" in
       --port) [[ $# -ge 2 ]] || die "--port 缺少值"; PORT="$2"; PORT_EXPLICIT=1; shift 2 ;;
       --sni) [[ $# -ge 2 ]] || die "--sni 缺少值"; SNI="$2"; SNI_EXPLICIT=1; shift 2 ;;
+      --name) [[ $# -ge 2 ]] || die "--name 缺少值"; NODE_NAME="$2"; NAME_EXPLICIT=1; shift 2 ;;
       *) die "未知参数：$1" ;;
     esac
   done
