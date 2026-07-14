@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
+# Version: 1.1.0
 set -Eeuo pipefail
 
 # sing-box VLESS Reality IPv4-only 一键安装脚本
-readonly VERSION="1.0.0"
+readonly VERSION="1.1.0"
 readonly CONF_DIR="/etc/sing-box"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly INFO_FILE="${CONF_DIR}/vless-info.env"
@@ -221,7 +222,7 @@ install_node() {
     journalctl -u sing-box --no-pager -n 50 >&2 || true
     die "sing-box 启动失败"
   fi
-  ok "VLESS Reality 已安装；监听、DNS、出站和系统均限制为 IPv4"
+  ok "sing-box VLESS Reality v${VERSION} 已安装；监听、DNS、出站和系统均限制为 IPv4"
   warn "请在云服务器安全组/防火墙放行 TCP $PORT，本脚本不自动修改防火墙"
   show_node
 }
@@ -288,7 +289,7 @@ main_menu() {
   [[ -t 0 ]] || { usage; return; }
   while true; do
     printf '\n========================================\n'
-    printf ' sing-box VLESS Reality 管理菜单\n'
+    printf ' sing-box VLESS Reality 管理菜单 v%s\n' "$VERSION"
     printf '========================================\n'
     printf '  1) 安装 VLESS Reality\n'
     printf '  2) 显示节点信息\n'
