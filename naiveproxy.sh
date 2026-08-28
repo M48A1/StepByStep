@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NaiveProxy OneClick v2.0.1 — Debian/Ubuntu x86_64 + systemd
+# NaiveProxy OneClick v2.0.2 — Debian/Ubuntu x86_64 + systemd
 # Public installer only: no account password, SSH key or fixed server domain.
 # Downloaded official binaries are verified against GitHub API SHA-256 digests.
 set -Eeuo pipefail
@@ -7,7 +7,7 @@ set -Eeuo pipefail
 case "${1:-}" in
   --help|-h)
     cat <<'NAIVE_HELP'
-NaiveProxy + Nginx stream 一键安装 v2.0.1
+NaiveProxy + Nginx stream 一键安装 v2.0.2
 支持：Debian/Ubuntu x86_64、root、systemd、公网 IPv4。
 公网 TCP 443 → Nginx stream；Naive 127.0.0.1:8443；VLESS 127.0.0.1:9443。
 无需占用 80，不提供 UDP/QUIC；客户端仍连接公网 443。
@@ -31,7 +31,7 @@ NaiveProxy + Nginx stream 一键安装 v2.0.1
 NAIVE_HELP
     exit 0
     ;;
-  --version) echo '2.0.1'; exit 0 ;;
+  --version) echo '2.0.2'; exit 0 ;;
 esac
 
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo '仅支持 Linux x86_64。' >&2; exit 1; }
@@ -67,7 +67,7 @@ import sys
 import tempfile
 from urllib.parse import quote, urlencode
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 AUTH_LINE = re.compile(r"(?m)^(?P<indent>[ \t]*)basic_auth[ \t]+(?P<args>[^\n]+)$")
 SITE_LINE = re.compile(r"(?m)^[ \t]*:(\d+)[ \t]*,[ \t]*([A-Za-z0-9.-]+)(?::(\d+))?[ \t]*\{[ \t]*$")
 MANAGED_FILES = ("Caddyfile", "client.json", "shadowrocket-http2.txt")
@@ -575,7 +575,7 @@ import time
 import urllib.request
 import stream_support as stream
 
-VERSION = "2.0.1"
+VERSION = "2.0.2"
 MANAGER_SOURCE = Path(__file__).with_name("naive-manager.py")
 RELEASE_API = "https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 
@@ -1077,6 +1077,7 @@ NAIVE_INSTALLER_PAYLOAD
 cat > "$naive_stage_dir/stream_support.py" <<'NAIVE_STREAM_PAYLOAD'
 """Dedicated nginx stream entry; conservative migration of standalone Xray REALITY."""
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -1151,13 +1152,22 @@ def check_bind(port, public=False):
     for family in families:
         try:
             with socket.socket(family) as sock:
+                # Match nginx/Go listener semantics: old TCP TIME_WAIT entries
+                # must not be mistaken for a live service. Never use REUSEPORT.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 if family == socket.AF_INET6:
                     sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
                 sock.bind((("::" if family == socket.AF_INET6 else "0.0.0.0") if public else "127.0.0.1", port))
+                sock.listen(1)
         except OSError as exc:
-            if family == socket.AF_INET6 and exc.errno in (97, 93, 99):
+            if family == socket.AF_INET6 and exc.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL):
                 continue
-            raise StreamError(f"TCP {port} 端口不可用；不会强制停止占用者。") from exc
+            try:
+                rows = listeners(port)
+                detail = "当前 LISTEN 监听：\n" + rows[:3000] if rows else "未发现 LISTEN 监听；请检查绑定地址、权限或未释放的套接字。"
+            except (OSError, subprocess.CalledProcessError):
+                detail = "无法读取 ss 监听诊断。"
+            raise StreamError(f"TCP {port} 端口不可用（{'IPv6' if family == socket.AF_INET6 else 'IPv4'}，{exc}）；不会强制停止占用者。\n{detail}") from exc
 
 
 def listeners(port):
@@ -1445,9 +1455,9 @@ NAIVE_STREAM_PAYLOAD
 
 # All payloads must be complete and match their build-time digest before any install.
 (cd "$naive_stage_dir" && sha256sum --check --status <<'NAIVE_PAYLOAD_HASHES'
-8b294838e7f3e2233f161268ee9b4a7f241871ac57cf3a2e604353cf3e4580cf  naive-manager.py
-5f862aeb93657d1b0f22e2c57d6f8e6145daff53ff4d746472421e1fd522f267  installer.py
-2cf28fb180e1757ed4f3fba5779e5ca92fbad6c9d9d6162b46f5b2921cd2cbcf  stream_support.py
+2f24ddbcb35cece054f51ca655b30241994346950326737111add1d4b74efa5b  naive-manager.py
+569fcf2fbd50098c89d130414f9165b3c9b8f4eef9d6a7febf3309fd756dc356  installer.py
+1bc99d62b64b66c772c946bd1a6f33d0ba82768adcd55b1ccbe3e2f576e28d56  stream_support.py
 NAIVE_PAYLOAD_HASHES
 ) || { echo '脚本内容不完整或校验失败，没有开始安装。' >&2; exit 1; }
 
