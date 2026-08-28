@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NaiveProxy OneClick v2.0.2 — Debian/Ubuntu x86_64 + systemd
+# NaiveProxy OneClick v2.0.3 — Debian/Ubuntu x86_64 + systemd
 # Public installer only: no account password, SSH key or fixed server domain.
 # Downloaded official binaries are verified against GitHub API SHA-256 digests.
 set -Eeuo pipefail
@@ -7,7 +7,7 @@ set -Eeuo pipefail
 case "${1:-}" in
   --help|-h)
     cat <<'NAIVE_HELP'
-NaiveProxy + Nginx stream 一键安装 v2.0.2
+NaiveProxy + Nginx stream 一键安装 v2.0.3
 支持：Debian/Ubuntu x86_64、root、systemd、公网 IPv4。
 公网 TCP 443 → Nginx stream；Naive 127.0.0.1:8443；VLESS 127.0.0.1:9443。
 无需占用 80，不提供 UDP/QUIC；客户端仍连接公网 443。
@@ -31,7 +31,7 @@ NaiveProxy + Nginx stream 一键安装 v2.0.2
 NAIVE_HELP
     exit 0
     ;;
-  --version) echo '2.0.2'; exit 0 ;;
+  --version) echo '2.0.3'; exit 0 ;;
 esac
 
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo '仅支持 Linux x86_64。' >&2; exit 1; }
@@ -67,7 +67,7 @@ import sys
 import tempfile
 from urllib.parse import quote, urlencode
 
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 AUTH_LINE = re.compile(r"(?m)^(?P<indent>[ \t]*)basic_auth[ \t]+(?P<args>[^\n]+)$")
 SITE_LINE = re.compile(r"(?m)^[ \t]*:(\d+)[ \t]*,[ \t]*([A-Za-z0-9.-]+)(?::(\d+))?[ \t]*\{[ \t]*$")
 MANAGED_FILES = ("Caddyfile", "client.json", "shadowrocket-http2.txt")
@@ -575,7 +575,7 @@ import time
 import urllib.request
 import stream_support as stream
 
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 MANAGER_SOURCE = Path(__file__).with_name("naive-manager.py")
 RELEASE_API = "https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 
@@ -1189,12 +1189,58 @@ def private_replace(path, data, mode, uid, gid):
         Path(name).unlink(missing_ok=True)
 
 
-def tls_probe(port, sni):
+def tls_probe(port, sni, timeout=8):
     """Check REALITY's unauthenticated TLS fallback, not a VLESS auth test."""
     context = ssl.create_default_context()
-    with socket.create_connection(("127.0.0.1", port), timeout=8) as connection:
+    with socket.create_connection(("127.0.0.1", port), timeout=timeout) as connection:
         with context.wrap_socket(connection, server_hostname=sni) as tls:
             return tls.version()
+
+
+def stream_state(service=SERVICE):
+    result = run(["systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ExecMainStatus,Result"], text=True, capture_output=True)
+    return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+
+
+def wait_stream_ready(xray=None, service=SERVICE, port=443, timeout=20):
+    """Type=simple/exec being active does not mean nginx has bound its sockets."""
+    deadline = time.monotonic() + timeout
+    last_error = "尚未监听"
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise StreamError(f"Nginx 在 {timeout:g} 秒内未就绪：{last_error}")
+        try:
+            state = stream_state(service)
+            if state.get("ActiveState") in ("failed", "inactive"):
+                raise StreamError(f"Nginx 服务已退出：{state}")
+            pid = int(state.get("MainPID", "0"))
+            rows = listeners(port)
+            if state.get("ActiveState") == "active" and pid > 0 and str(pid) in re.findall(r"pid=(\d+)", rows):
+                if xray:
+                    tls_probe(port, xray.sni, timeout=min(8, remaining))
+                return
+            last_error = f"state={state.get('ActiveState')}/{state.get('SubState')}，尚未确认该服务监听 TCP {port}"
+        except (OSError, subprocess.CalledProcessError) as exc:
+            last_error = str(exc)
+        time.sleep(min(0.2, remaining))
+
+
+def stream_diagnostics(service=SERVICE):
+    lines = []
+    for title, args in [
+        ("service", ["systemctl", "show", service, "--property=ActiveState,SubState,MainPID,ExecMainStatus,Result"]),
+        ("TCP 443", ["ss", "-H", "-ltnp", "sport = :443"]),
+        ("TCP 9443", ["ss", "-H", "-ltnp", "sport = :9443"]),
+        ("nginx journal", ["journalctl", "-u", service, "-n", "40", "--no-pager", "--output=short-iso"]),
+    ]:
+        try:
+            result = subprocess.run(args, text=True, capture_output=True, timeout=8)
+            output = (getattr(result, "stdout", "") or "") + (getattr(result, "stderr", "") or "")
+            lines.append(f"[{title}]\n{output[-12000:]}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            lines.append(f"[{title}] {exc}")
+    return "\n".join(lines)
 
 
 class XrayMigration:
@@ -1325,6 +1371,7 @@ KillSignal=SIGQUIT
 TimeoutStopSec=15s
 Restart=on-failure
 RestartSec=2s
+LimitNOFILE=65536
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
@@ -1406,6 +1453,7 @@ class StreamSetup:
     def install(self):
         # All potentially slow package/download/config validation precedes disruption.
         ensure_nginx()
+        phase = "准备 Nginx 配置"
         try:
             directory = self.path(CONF).parent
             if directory.is_symlink():
@@ -1426,15 +1474,34 @@ class StreamSetup:
             self.unit_written = True
             run(["systemctl", "daemon-reload"])
             if self.xray:
+                phase = "迁移 Xray"
                 self.xray.apply()
             else:
                 check_bind(443, public=True)
+            phase = "启动 Nginx"
             run(["systemctl", "enable", "--now", SERVICE])
-            run(["systemctl", "is-active", "--quiet", SERVICE])
-            if self.xray:
-                tls_probe(443, self.xray.sni)
+            phase = "等待 Nginx 监听和 TLS 转发就绪"
+            wait_stream_ready(self.xray)
             print("Nginx stream 已接管 TCP 443；现在安装 NaiveProxy 后端。", flush=True)
-        except BaseException:
+        except BaseException as exc:
+            print(f"{phase}失败：{exc}", flush=True)
+            if self.unit_written:
+                diagnostics = f"{phase}失败：{exc}\n" + stream_diagnostics()
+                print("回滚前的 Nginx/监听诊断：\n" + diagnostics, flush=True)
+                try:
+                    folder = self.path("/var/log/naive-installer")
+                    if folder.is_symlink():
+                        raise OSError("诊断目录不能是符号链接")
+                    folder.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    if folder.stat().st_uid != os.geteuid():
+                        raise OSError("诊断目录不属于 root")
+                    folder.chmod(0o700)
+                    fd, name = tempfile.mkstemp(prefix="stream-", suffix=".log", dir=folder)
+                    with os.fdopen(fd, "w") as report:
+                        report.write(diagnostics)
+                    print("诊断已保存：" + name, flush=True)
+                except OSError as log_error:
+                    print("无法保存诊断，请保留上述输出：" + str(log_error), flush=True)
             self.rollback()
             raise
 
@@ -1455,9 +1522,9 @@ NAIVE_STREAM_PAYLOAD
 
 # All payloads must be complete and match their build-time digest before any install.
 (cd "$naive_stage_dir" && sha256sum --check --status <<'NAIVE_PAYLOAD_HASHES'
-2f24ddbcb35cece054f51ca655b30241994346950326737111add1d4b74efa5b  naive-manager.py
-569fcf2fbd50098c89d130414f9165b3c9b8f4eef9d6a7febf3309fd756dc356  installer.py
-1bc99d62b64b66c772c946bd1a6f33d0ba82768adcd55b1ccbe3e2f576e28d56  stream_support.py
+e7f7ea0b76d13e21cdfa8f3653281d9465c94ff34e33153b170e0b24393d430c  naive-manager.py
+04fb45cf2bafb0cc8f4e813660a43d53bc40e8cacd1d21ae1223fe53c5dd566a  installer.py
+928d820098ffcbb61f0e3ed2f862ca2149def4cccba1f120f621681061b32f69  stream_support.py
 NAIVE_PAYLOAD_HASHES
 ) || { echo '脚本内容不完整或校验失败，没有开始安装。' >&2; exit 1; }
 
