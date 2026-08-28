@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NaiveProxy OneClick v1.0.0 — Debian/Ubuntu x86_64 + systemd
+# NaiveProxy OneClick v2.0.0 — Debian/Ubuntu x86_64 + systemd
 # Public installer only: no account password, SSH key or fixed server domain.
 # Downloaded official binaries are verified against GitHub API SHA-256 digests.
 set -Eeuo pipefail
@@ -7,8 +7,10 @@ set -Eeuo pipefail
 case "${1:-}" in
   --help|-h)
     cat <<'NAIVE_HELP'
-NaiveProxy 一键安装 v1.0.0
-支持：Debian/Ubuntu x86_64、root、systemd、公网 IPv4，80/443 端口空闲。
+NaiveProxy + Nginx stream 一键安装 v2.0.0
+支持：Debian/Ubuntu x86_64、root、systemd、公网 IPv4。
+公网 TCP 443 → Nginx stream；Naive 127.0.0.1:8443；VLESS 127.0.0.1:9443。
+无需占用 80，不提供 UDP/QUIC；客户端仍连接公网 443。
 首次运行交互安装；已安装时进入 naive-manager，不覆盖现有配置。
 
 参数：
@@ -17,14 +19,19 @@ NaiveProxy 一键安装 v1.0.0
   --password-file PATH   从 root 私有文件读取密码；不支持明文命令行密码
   --yes                  非交互确认，须指定域名；默认随机密码
   --check                只检查，不安装依赖或修改服务
+  --migrate-xray         允许将已有独立 Xray REALITY 从 443 迁到本机 9443
+  --xray-service NAME    默认 xray.service
+  --xray-config PATH     可选：核对运行中的 Xray 配置文件路径
   --version              显示安装脚本版本
 
-不停止已有网站，不清空防火墙，不修改 SSH，不自动升级已有部署。
+迁移只支持单一 JSON 的独立 Xray REALITY TCP/raw，会短暂断线；失败尝试回滚。
+面板/Docker/其他占用者不自动迁移；旧版 Naive 直连部署不自动切换架构。
+不清空防火墙，不修改 SSH，不自动升级已有部署。
 安装后：naive-manager；节点链接：naive-manager link。
 NAIVE_HELP
     exit 0
     ;;
-  --version) echo '1.0.0'; exit 0 ;;
+  --version) echo '2.0.0'; exit 0 ;;
 esac
 
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo '仅支持 Linux x86_64。' >&2; exit 1; }
@@ -60,7 +67,7 @@ import sys
 import tempfile
 from urllib.parse import quote, urlencode
 
-VERSION = "1.1.0"
+VERSION = "2.0.0"
 AUTH_LINE = re.compile(r"(?m)^(?P<indent>[ \t]*)basic_auth[ \t]+(?P<args>[^\n]+)$")
 SITE_LINE = re.compile(r"(?m)^[ \t]*:(\d+)[ \t]*,[ \t]*([A-Za-z0-9.-]+)(?::(\d+))?[ \t]*\{[ \t]*$")
 MANAGED_FILES = ("Caddyfile", "client.json", "shadowrocket-http2.txt")
@@ -470,6 +477,68 @@ def main():
     return 0
 
 
+# Embedded before the manager's main entry point. Retains legacy direct-mode support.
+_direct_parse_config = parse_config
+_direct_validate_adapted = validate_adapted
+
+
+def parse_config(text):
+    info = _direct_parse_config(text)
+    if text.startswith("# naive-stream-v1 public=443 backend=8443\n"):
+        if info["port"] != 8443:
+            raise ManagerError("stream 后端必须保持 8443；客户端公网端口为 443。")
+        info["port"], info["backend_port"] = 443, 8443
+    return info
+
+
+def validate_adapted(document, info):
+    if not info.get("backend_port"):
+        return _direct_validate_adapted(document, info)
+    servers = list(document.get("apps", {}).get("http", {}).get("servers", {}).values())
+    if len(servers) != 1 or servers[0].get("listen") != ["127.0.0.1:8443"]:
+        raise ManagerError("stream 模式必须仅在 127.0.0.1:8443 提供 Naive 后端。")
+    if servers[0].get("protocols") != ["h1", "h2"] or not servers[0].get("automatic_https", {}).get("disable_redirects"):
+        raise ManagerError("stream 模式必须关闭 HTTP/3 和 HTTP 自动重定向。")
+    if document.get("admin", {}).get("listen") != "127.0.0.1:2019":
+        raise ManagerError("管理端口必须保持本机 2019。")
+    # Reuse auth/domain validation after normalizing the already-checked listener.
+    cloned = json.loads(json.dumps(document))
+    next(iter(cloned["apps"]["http"]["servers"].values()))["listen"] = [":443"]
+    _direct_validate_adapted(cloned, info)
+
+
+_DirectManager = Manager
+
+
+class Manager(_DirectManager):
+    def apply(self, candidate, expected_original=None):
+        old, new = parse_config(self.read()), parse_config(candidate)
+        if old.get("backend_port"):
+            if not new.get("backend_port") or old["domain"] != new["domain"]:
+                raise ManagerError("stream 模式下此菜单只修改 Naive 设置/账号，不能单独改变域名或端口；需同步规划 Nginx 分流。")
+        return super().apply(candidate, expected_original)
+
+    def check(self):
+        super().check()
+        info = parse_config(self.read())
+        if info.get("backend_port"):
+            conf = Path("/etc/naive-stream/nginx.conf")
+            expected = re.escape(info["domain"]) + r"\s+127\.0\.0\.1:8443;"
+            if not re.search(expected, conf.read_text()):
+                raise ManagerError("Nginx 分流与 Naive 域名不一致。")
+            self.command(["/usr/sbin/nginx", "-t", "-c", str(conf)])
+
+    def dispatch(self, action, argument=None):
+        if parse_config(self.read()).get("backend_port"):
+            if action == "status":
+                self.command(["systemctl", "status", "naive-stream.service", self.service, "--no-pager", "-l"])
+                return
+            if action == "logs":
+                self.command(["journalctl", "-u", "naive-stream.service", "-u", self.service, "-n", "70", "--no-pager"])
+                return
+        return super().dispatch(action, argument)
+
+
 if __name__ == "__main__":
     sys.exit(main())
 NAIVE_MANAGER_PAYLOAD
@@ -478,7 +547,6 @@ cat > "$naive_stage_dir/installer.py" <<'NAIVE_INSTALLER_PAYLOAD'
 """Single-file installer payload. No secrets or machine-specific domain embedded."""
 import argparse
 import base64
-import errno
 import getpass
 import grp
 import hashlib
@@ -501,8 +569,9 @@ import tarfile
 import tempfile
 import time
 import urllib.request
+import stream_support as stream
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 MANAGER_SOURCE = Path(__file__).with_name("naive-manager.py")
 RELEASE_API = "https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 
@@ -577,21 +646,6 @@ def check_dns(domain):
     return ipv4
 
 
-def check_ports():
-    for family in (socket.AF_INET, socket.AF_INET6):
-        for kind, port in ((socket.SOCK_STREAM, 80), (socket.SOCK_STREAM, 443), (socket.SOCK_DGRAM, 443)):
-            try:
-                with socket.socket(family, kind) as sock:
-                    if family == socket.AF_INET6:
-                        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-                    sock.bind(("0.0.0.0" if family == socket.AF_INET else "::", port))
-            except OSError as exc:
-                if family == socket.AF_INET6 and exc.errno in (errno.EAFNOSUPPORT, errno.EPROTONOSUPPORT, errno.EADDRNOTAVAIL):
-                    continue
-                transport = "TCP" if kind == socket.SOCK_STREAM else "UDP"
-                raise InstallError(f"{transport} {port} 端口不可绑定，可能已有服务占用。不会停止现有服务。") from exc
-
-
 def choose_release(document):
     tag = document.get("tag_name", "")
     if document.get("draft") or document.get("prerelease") or not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+-naive", tag):
@@ -625,18 +679,27 @@ def unpack_verified(archive, asset):
 
 
 def make_caddyfile(info):
-    template = '''{
+    template = '''# naive-stream-v1 public=443 backend=8443
+{
     order forward_proxy before file_server
     admin 127.0.0.1:2019
+    https_port 8443
+    default_bind 127.0.0.1
+    auto_https disable_redirects
+    servers {
+        protocols h1 h2
+    }
     log {
         exclude http.log.error
     }
 }
 
-:443, DOMAIN {
+:8443, DOMAIN:8443 {
     tls {
         issuer acme {
             dir https://acme-v02.api.letsencrypt.org/directory
+            disable_http_challenge
+            alt_tlsalpn_port 8443
         }
     }
     encode zstd gzip
@@ -664,7 +727,8 @@ UNIT = '''[Unit]
 Description=NaiveProxy HTTPS forward proxy
 Documentation=https://github.com/klzgrad/naiveproxy
 Wants=network-online.target
-After=network-online.target
+After=network-online.target naive-stream.service
+Wants=naive-stream.service
 
 [Service]
 Type=notify
@@ -682,8 +746,7 @@ RestartSec=5s
 TimeoutStopSec=15s
 LimitNOFILE=1048576
 UMask=0027
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -790,7 +853,7 @@ class Installer:
                 pass
         print("本次创建的程序和配置已撤回。已安装的系统依赖、服务账户以及可能生成的证书状态会保留。")
 
-    def install(self, info, tag, asset, files, archive, work):
+    def install(self, info, tag, asset, files, archive, work, stream_setup=None):
         candidate = work / "Caddyfile"
         candidate.write_text(make_caddyfile(info))
         candidate.chmod(0o600)
@@ -799,10 +862,12 @@ class Installer:
         binary.chmod(0o755)
         env = dict(os.environ, XDG_DATA_HOME=str(work / "data"), XDG_CONFIG_HOME=str(work / "config"))
         adapted = run([str(binary), "adapt", "--config", str(candidate), "--adapter", "caddyfile"], text=True, capture_output=True, env=env)
-        self.api["validate_adapted"](json.loads(adapted.stdout), info)
+        self.api["validate_adapted"](json.loads(adapted.stdout), self.api["parse_config"](candidate.read_text()))
         run([str(binary), "validate", "--config", str(candidate), "--adapter", "caddyfile"], env=env)
         try:
             uid, gid = self.ensure_account()
+            if stream_setup:
+                stream_setup.install()
             for path, mode, owner, group in [
                 ("/opt/naiveproxy", 0o755, 0, 0), ("/opt/naiveproxy/releases", 0o755, 0, 0),
                 (f"/opt/naiveproxy/releases/{tag}", 0o755, 0, 0), ("/opt/naiveproxy/downloads", 0o755, 0, 0),
@@ -824,7 +889,7 @@ class Installer:
             self.write_new(self.path("/var/www/naiveproxy/index.html"), page, 0o644)
             self.write_new(self.path("/etc/systemd/system/naiveproxy.service"), UNIT.encode(), 0o644)
             self.unit_written = True
-            manifest = {"installer_version": VERSION, "server_release": tag, "server_archive_sha256": asset["digest"], "domain": info["domain"], "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+            manifest = {"installer_version": VERSION, "server_release": tag, "server_archive_sha256": asset["digest"], "domain": info["domain"], "topology": "nginx-stream", "public_port": 443, "naive_backend": "127.0.0.1:8443", "vless_backend": "127.0.0.1:9443" if stream_setup and stream_setup.xray else None, "xray_backup": str(stream_setup.xray.backup) if stream_setup and stream_setup.xray else None, "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
             self.write_new(self.path("/etc/naiveproxy/install-manifest.json"), (json.dumps(manifest, indent=2) + "\n").encode(), 0o600)
             run(["systemd-analyze", "verify", "/etc/systemd/system/naiveproxy.service"])
             run(["/usr/local/sbin/naive-manager", "check"])
@@ -832,7 +897,11 @@ class Installer:
             run(["systemctl", "enable", "--now", "naiveproxy.service"])
             run(["systemctl", "is-active", "--quiet", "naiveproxy.service"])
         except BaseException:
-            self.rollback()
+            try:
+                self.rollback()
+            finally:
+                if stream_setup and stream_setup.unit_written:
+                    stream_setup.rollback()
             raise
 
 
@@ -875,17 +944,20 @@ def wait_ready(info, expected_ip, timeout=90):
             print("等待证书签发/代理就绪…", flush=True)
             time.sleep(min(3, max(0, deadline - time.monotonic())))
     print("安装已完成，但尚未通过证书或代理测试：" + last_error)
-    print("不要关闭证书验证；检查 DNS 和云防火墙 TCP 80/443，再运行 naive-manager logs。")
+    print("不要关闭证书验证；检查 DNS 和云防火墙 TCP 443，再运行 naive-manager logs。")
     return False
 
 
 def parser():
-    result = argparse.ArgumentParser(description="NaiveProxy 一键安装：Debian/Ubuntu x86_64，固定 443 端口。重复运行不重装。")
+    result = argparse.ArgumentParser(description="NaiveProxy + Nginx stream：公网 443，Naive 本机 8443，VLESS 本机 9443。")
     result.add_argument("--domain", help="已直接解析到本机的域名")
     result.add_argument("--username", default="naive", help="默认 naive")
     result.add_argument("--password-file", type=Path, help="从 root 私有文件读取密码，不把密码放入命令行")
     result.add_argument("--yes", action="store_true", help="无需最终确认；首次安装须同时指定 --domain")
     result.add_argument("--check", action="store_true", help="只检查，不安装系统依赖或修改服务")
+    result.add_argument("--migrate-xray", action="store_true", help="明确允许备份并迁移占用 443 的独立 Xray REALITY")
+    result.add_argument("--xray-service", default="xray.service", help="默认 xray.service；必须直接启动单一配置的 Xray")
+    result.add_argument("--xray-config", type=Path, help="可选：核对实际 Xray 配置路径，不指定则从运行进程读取")
     return result
 
 
@@ -904,6 +976,10 @@ def main(argv=None):
         if manager_stat.st_uid != 0 or manager_stat.st_mode & 0o022:
             raise InstallError("已有管理脚本不是 root 独占写入，不会自动执行。")
         print("检测到已安装 NaiveProxy；保留现有配置、账号、证书和程序版本。")
+        if "# naive-stream-v1" not in installer.path("/etc/naiveproxy/Caddyfile").read_text():
+            print("这是旧版直连部署，本脚本不会自动切换架构；没有安装 Nginx stream。")
+        if args.migrate_xray:
+            raise InstallError("已有 NaiveProxy 时不能执行首次 Xray 迁移，请单独规划架构切换。")
         if args.domain:
             actual = installer.api["parse_config"](installer.path("/etc/naiveproxy/Caddyfile").read_text())
             if valid_domain(args.domain) != actual["domain"]:
@@ -915,7 +991,8 @@ def main(argv=None):
         else:
             print("管理命令：naive-manager；查看节点链接：naive-manager link")
         return 0
-    check_ports()
+    if args.xray_config and not args.migrate_xray:
+        raise InstallError("--xray-config 必须与 --migrate-xray 一起使用。")
     installer.check_account()
     load_state = subprocess.run(["systemctl", "show", "naiveproxy.service", "-p", "LoadState", "--value"], text=True, capture_output=True).stdout.strip()
     if load_state != "not-found":
@@ -923,12 +1000,23 @@ def main(argv=None):
     if shutil.disk_usage("/").free < 300 * 1024 * 1024:
         raise InstallError("磁盘剩余空间不足 300 MB。")
     if args.check and not args.domain:
-        print("系统、目录和 80/443 端口检查通过。可用 --check --domain 你的域名 继续检查 DNS。")
+        print("系统和目录检查通过。请加 --domain 检查 DNS、端口和迁移条件。")
         return 0
     if not args.domain and (args.yes or not sys.stdin.isatty()):
         raise InstallError("非交互安装必须指定 --domain；没有修改服务。")
     domain = valid_domain(args.domain or input("请输入已解析到本机的域名："))
     expected_ip = check_dns(domain)
+    occupied = stream.listeners(443)
+    if occupied and not args.migrate_xray:
+        if args.check or args.yes or not sys.stdin.isatty():
+            raise InstallError("TCP 443 已占用。若是独立 Xray REALITY，检查后加 --migrate-xray 明确授权迁移；不会擅自停止现有服务。")
+        print("TCP 443 已占用；只支持备份并迁移独立 Xray VLESS REALITY TCP/raw。迁移会短暂断线。")
+        args.migrate_xray = input("允许检查并迁移 Xray？[输入 y]：").strip().lower() == "y"
+        if not args.migrate_xray:
+            raise InstallError("未授权迁移，已停止。")
+    xray = stream.XrayMigration(args.xray_service, domain, args.xray_config) if args.migrate_xray else None
+    setup = stream.StreamSetup(domain, xray)
+    setup.preflight()
     if args.check:
         print("DNS 和系统检查通过；没有安装、修改或重载服务。")
         return 0
@@ -947,7 +1035,8 @@ def main(argv=None):
     password = password or secrets.token_urlsafe(24)
     installer.api["credentials_valid"](args.username, password)
     info = {"domain": domain, "port": 443, "username": args.username, "password": password}
-    print(f"将安装到 {domain}:443；使用独立服务账户；不会更改 SSH 或防火墙。")
+    print(f"将安装 Nginx stream :443 → {domain} 到 127.0.0.1:8443；其他 SNI 到 " + ("127.0.0.1:9443。" if xray else "Naive 后端。"))
+    print("不会更改 SSH 或防火墙。证书由 Caddy 经 443 TLS-ALPN 自动签发；仅提供 TCP HTTP/2。")
     if not args.yes and input("确认安装？[输入 y 继续]：").strip().lower() != "y":
         print("已取消；未安装代理服务。")
         return 0
@@ -958,7 +1047,7 @@ def main(argv=None):
         archive = work / "caddy.tar.xz"
         archive.write_bytes(fetch(asset["browser_download_url"]))
         files = unpack_verified(archive, asset)
-        installer.install(info, tag, asset, files, archive, work)
+        installer.install(info, tag, asset, files, archive, work, setup)
     ready = wait_ready(info, expected_ip)
     print("\n管理命令：naive-manager")
     print("小火箭 HTTP2 节点（包含密码，请勿公开）：")
@@ -981,11 +1070,365 @@ if __name__ == "__main__":
         print(f"错误：{exc}", file=sys.stderr)
         raise SystemExit(1)
 NAIVE_INSTALLER_PAYLOAD
+cat > "$naive_stage_dir/stream_support.py" <<'NAIVE_STREAM_PAYLOAD'
+"""Dedicated nginx stream entry; conservative migration of standalone Xray REALITY."""
+import copy
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import socket
+import ssl
+import subprocess
+import tempfile
+import time
+
+SERVICE = "naive-stream.service"
+CONF = "/etc/naive-stream/nginx.conf"
+UNIT_PATH = "/etc/systemd/system/naive-stream.service"
+MODULE = "/usr/lib/nginx/modules/ngx_stream_module.so"
+BACKUP_ROOT = Path("/var/backups/naive-stream")
+
+
+class StreamError(Exception):
+    pass
+
+
+def run(args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def strict_json(data):
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise StreamError("JSON 含重复键，拒绝自动迁移。")
+            result[key] = value
+        return result
+    try:
+        return json.loads(data, object_pairs_hook=unique)
+    except (ValueError, UnicodeError) as exc:
+        raise StreamError("仅支持普通 JSON 配置；JSONC/注释或分片配置需人工处理。") from exc
+
+
+def migrate_document(document, domain):
+    """Only change the selected inbound's listen/port; preserve all key material."""
+    result = copy.deepcopy(document)
+    candidates = [row for row in result.get("inbounds", []) if row.get("port") == 443]
+    if len(candidates) != 1:
+        raise StreamError("必须恰好有一个端口为整数 443 的入站。")
+    row = candidates[0]
+    transport = row.get("streamSettings", {})
+    if (row.get("protocol") != "vless" or transport.get("security") != "reality"
+            or transport.get("network", "tcp") not in ("tcp", "raw")):
+        raise StreamError("自动迁移仅支持独立 Xray 的 VLESS + REALITY + TCP/raw；其他类型需人工接入。")
+    if transport.get("sockopt", {}).get("acceptProxyProtocol") or row.get("settings", {}).get("fallbacks"):
+        raise StreamError("入站含 PROXY protocol 或 fallbacks，拒绝自动迁移。")
+    if row.get("listen", "0.0.0.0") not in ("0.0.0.0", "::", "::0", "127.0.0.1"):
+        raise StreamError("入站绑定了特定地址，需人工确认后迁移。")
+    reality = transport.get("realitySettings", {})
+    names = reality.get("serverNames", [])
+    if not names or any(not isinstance(n, str) or not re.fullmatch(r"[A-Za-z0-9.-]+", n) for n in names):
+        raise StreamError("REALITY serverNames 必须是明确的普通域名，不能是通配符/空值。")
+    if domain.lower() in {n.lower() for n in names}:
+        raise StreamError("NaiveProxy 域名与 REALITY SNI 相同，无法按 SNI 分流。")
+    target = str(reality.get("target", reality.get("dest", ""))).rsplit(":", 1)[0].lower()
+    if target == domain.lower():
+        raise StreamError("REALITY 目标不能指向新的 NaiveProxy 域名。")
+    row["listen"], row["port"] = "127.0.0.1", 9443
+    return result, names[0]
+
+
+def check_bind(port, public=False):
+    families = (socket.AF_INET, socket.AF_INET6) if public else (socket.AF_INET,)
+    for family in families:
+        try:
+            with socket.socket(family) as sock:
+                if family == socket.AF_INET6:
+                    sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                sock.bind((("::" if family == socket.AF_INET6 else "0.0.0.0") if public else "127.0.0.1", port))
+        except OSError as exc:
+            if family == socket.AF_INET6 and exc.errno in (97, 93, 99):
+                continue
+            raise StreamError(f"TCP {port} 端口不可用；不会强制停止占用者。") from exc
+
+
+def listeners(port):
+    result = run(["ss", "-H", "-ltnp", f"sport = :{port}"], text=True, capture_output=True)
+    return result.stdout.strip()
+
+
+def private_replace(path, data, mode, uid, gid):
+    fd, name = tempfile.mkstemp(prefix=".naive-migrate-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            os.fchmod(stream.fileno(), mode)
+            os.fchown(stream.fileno(), uid, gid)
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def tls_probe(port, sni):
+    """Check REALITY's unauthenticated TLS fallback, not a VLESS auth test."""
+    context = ssl.create_default_context()
+    with socket.create_connection(("127.0.0.1", port), timeout=8) as connection:
+        with context.wrap_socket(connection, server_hostname=sni) as tls:
+            return tls.version()
+
+
+class XrayMigration:
+    def __init__(self, service, domain, config=None):
+        if not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", service):
+            raise StreamError("Xray 服务名不正确。")
+        self.service, self.changed, self.backup = service, False, None
+        self.pid = int(run(["systemctl", "show", service, "-p", "MainPID", "--value"], capture_output=True, text=True).stdout.strip() or 0)
+        if self.pid <= 1:
+            raise StreamError("指定的 Xray 服务未运行，不能接管 443。")
+        proc = Path(f"/proc/{self.pid}")
+        self.binary = (proc / "exe").resolve(strict=True)
+        if self.binary.name != "xray" or os.readlink(proc / "ns/net") != os.readlink("/proc/self/ns/net"):
+            raise StreamError("不是本机网络命名空间内的独立 Xray；不迁移面板/Docker。")
+        argv = (proc / "cmdline").read_bytes().decode().strip("\0").split("\0")
+        if len(argv) != 4 or argv[1] != "run" or argv[2] not in ("-c", "-config", "--config"):
+            raise StreamError("Xray 必须直接以 run -config 单一绝对路径启动；分片/包装器需人工接入。")
+        self.path = Path(argv[3])
+        if not self.path.is_absolute() or self.path.is_symlink() or not self.path.is_file():
+            raise StreamError("Xray 配置必须为绝对路径的普通文件，不能是符号链接。")
+        if config and Path(config).resolve() != self.path.resolve():
+            raise StreamError("指定配置与正在运行的 Xray 实际配置不同，已停止。")
+        for path in (self.path, self.binary, *self.path.parents, *self.binary.parents):
+            stat = path.stat()
+            if stat.st_uid != 0 or stat.st_mode & 0o022:
+                raise StreamError("Xray 配置/程序及父目录必须由 root 独占写入。")
+        self.assert_owner(443)
+        self.stat = self.path.stat()
+        self.original = self.path.read_bytes()
+        migrated, self.sni = migrate_document(strict_json(self.original), domain)
+        self.candidate = (json.dumps(migrated, ensure_ascii=False, indent=2) + "\n").encode()
+
+    def assert_owner(self, port):
+        rows = listeners(port)
+        pids = set(re.findall(r"pid=(\d+)", rows))
+        if not rows or pids != {str(self.pid)} or any("pid=" not in line for line in rows.splitlines()):
+            raise StreamError(f"TCP {port} 并非仅由指定 Xray 服务监听，停止接管。")
+
+    def prepare(self):
+        fd, name = tempfile.mkstemp(prefix=".naive-check-", suffix=".json", dir=self.path.parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(self.candidate)
+            # No captured output is printed: Xray validation errors may contain key material.
+            run([str(self.binary), "run", "-test", "-config", name], capture_output=True)
+        finally:
+            Path(name).unlink(missing_ok=True)
+        tls_probe(443, self.sni)
+
+    def apply(self):
+        self.assert_owner(443)
+        if self.path.read_bytes() != self.original:
+            raise StreamError("Xray 配置在检查后发生变化，取消迁移。")
+        folder = BACKUP_ROOT
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if folder.is_symlink() or folder.stat().st_uid != 0 or folder.stat().st_mode & 0o077:
+            raise StreamError("迁移备份目录必须为 root 私有目录。")
+        self.backup = Path(tempfile.mkdtemp(prefix=time.strftime("%Y%m%dT%H%M%S-"), dir=folder))
+        (self.backup / "xray.json").write_bytes(self.original)
+        (self.backup / "xray.json").chmod(0o600)
+        metadata = {"config": str(self.path), "service": self.service,
+                    "sha256": hashlib.sha256(self.original).hexdigest(),
+                    "mode": self.stat.st_mode & 0o777, "uid": self.stat.st_uid, "gid": self.stat.st_gid}
+        (self.backup / "manifest.json").write_text(json.dumps(metadata, indent=2) + "\n")
+        (self.backup / "manifest.json").chmod(0o600)
+        print("Xray 原配置备份：" + str(self.backup), flush=True)
+        self.changed = True
+        private_replace(self.path, self.candidate, self.stat.st_mode & 0o777, self.stat.st_uid, self.stat.st_gid)
+        run(["systemctl", "restart", self.service])
+        run(["systemctl", "is-active", "--quiet", self.service])
+        self.pid = int(run(["systemctl", "show", self.service, "-p", "MainPID", "--value"], capture_output=True, text=True).stdout.strip())
+        for attempt in range(20):
+            if listeners(9443):
+                break
+            time.sleep(0.2)
+        self.assert_owner(9443)
+        check_bind(443, public=True)
+
+    def restore(self):
+        if not self.changed:
+            return
+        if self.path.read_bytes() not in (self.original, self.candidate):
+            raise StreamError(f"Xray 配置被其他程序修改，拒绝覆盖。请从 {self.backup} 人工恢复。")
+        private_replace(self.path, self.original, self.stat.st_mode & 0o777, self.stat.st_uid, self.stat.st_gid)
+        run(["systemctl", "restart", self.service])
+        run(["systemctl", "is-active", "--quiet", self.service])
+        self.changed = False
+        print("Xray 原配置已恢复并启动。")
+
+
+def nginx_config(domain, has_xray, module=True, ipv6=True, front=443, naive=8443, vless=9443):
+    if not re.fullmatch(r"[a-z0-9.-]+", domain):
+        raise StreamError("无效的分流域名。")
+    return ((f"load_module {MODULE};\n" if module else "") + f'''worker_processes auto;
+pid /run/naive-stream/nginx.pid;
+error_log stderr warn;
+events {{ worker_connections 4096; }}
+stream {{
+    map $ssl_preread_server_name $naive_upstream {{
+        {domain} 127.0.0.1:{naive};
+        default 127.0.0.1:{vless if has_xray else naive};
+    }}
+    server {{
+        listen 0.0.0.0:{front};
+''' + (f"        listen [::]:{front} ipv6only=on;\n" if ipv6 else "") + '''        ssl_preread on;
+        preread_timeout 10s;
+        proxy_connect_timeout 5s;
+        proxy_timeout 1h;
+        proxy_pass $naive_upstream;
+    }
+}
+''')
+
+
+UNIT = '''[Unit]
+Description=Naive / VLESS TLS SNI stream entry
+Wants=network-online.target
+After=network-online.target
+[Service]
+Type=simple
+User=naiveproxy
+Group=naiveproxy
+RuntimeDirectory=naive-stream
+ExecStartPre=/usr/sbin/nginx -t -c /etc/naive-stream/nginx.conf
+ExecStart=/usr/sbin/nginx -c /etc/naive-stream/nginx.conf -g 'daemon off;'
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGQUIT
+TimeoutStopSec=15s
+Restart=on-failure
+RestartSec=2s
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+[Install]
+WantedBy=multi-user.target
+'''
+
+
+def ensure_nginx():
+    """Install distro-signed packages; prevent package scripts starting other services."""
+    if Path("/usr/sbin/nginx").exists() and Path(MODULE).exists():
+        return
+    policy = Path("/usr/sbin/policy-rc.d")
+    if policy.exists() or policy.is_symlink():
+        raise StreamError("已有 policy-rc.d；请先自行安装 nginx libnginx-mod-stream，再重试。不会覆盖系统策略。")
+    existed = Path("/usr/sbin/nginx").exists()
+    policy_text = b"#!/bin/sh\nexit 101\n"
+    with policy.open("xb") as stream:
+        stream.write(policy_text)
+    policy.chmod(0o755)
+    try:
+        run(["apt-get", "update"])
+        run(["apt-get", "install", "-y", "--no-upgrade", "--no-install-recommends", "nginx", "libnginx-mod-stream"],
+            env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+    finally:
+        if policy.read_bytes() == policy_text:
+            policy.unlink()
+        else:
+            raise StreamError("policy-rc.d 在安装中被修改，未删除，请检查。")
+        if not existed and Path("/usr/sbin/nginx").exists():
+            run(["systemctl", "disable", "nginx.service"])
+    if not Path(MODULE).exists():
+        raise StreamError("未找到发行版 Nginx stream 动态模块。")
+
+
+def ipv6_enabled():
+    try:
+        with socket.socket(socket.AF_INET6) as sock:
+            sock.bind(("::1", 0))
+        return True
+    except OSError:
+        return False
+
+
+class StreamSetup:
+    def __init__(self, domain, xray=None, root=Path("/")):
+        self.domain, self.xray, self.root = domain, xray, root
+        self.created, self.unit_written = [], False
+
+    def path(self, name):
+        return self.root / name.lstrip("/")
+
+    def preflight(self):
+        for name in (CONF, UNIT_PATH):
+            if self.path(name).exists() or self.path(name).is_symlink():
+                raise StreamError("已有 stream 配置/服务，拒绝覆盖：" + name)
+        state = run(["systemctl", "show", SERVICE, "-p", "LoadState", "--value"], text=True, capture_output=True).stdout.strip()
+        if state != "not-found":
+            raise StreamError("systemd 已有同名 stream 服务，拒绝接管。")
+        check_bind(8443)
+        check_bind(2019)
+        if self.xray:
+            check_bind(9443)
+            self.xray.prepare()
+        else:
+            check_bind(443, public=True)
+
+    def install(self):
+        # All potentially slow package/download/config validation precedes disruption.
+        ensure_nginx()
+        try:
+            self.path(CONF).parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+            for name, data in ((CONF, nginx_config(self.domain, bool(self.xray), ipv6=ipv6_enabled())), (UNIT_PATH, UNIT)):
+                path = self.path(name)
+                with path.open("x") as stream:
+                    self.created.append(path)
+                    stream.write(data)
+                path.chmod(0o644)
+            run(["/usr/sbin/nginx", "-t", "-c", str(self.path(CONF))])
+            run(["systemd-analyze", "verify", str(self.path(UNIT_PATH))])
+            self.unit_written = True
+            run(["systemctl", "daemon-reload"])
+            if self.xray:
+                self.xray.apply()
+            else:
+                check_bind(443, public=True)
+            run(["systemctl", "enable", "--now", SERVICE])
+            run(["systemctl", "is-active", "--quiet", SERVICE])
+            if self.xray:
+                tls_probe(443, self.xray.sni)
+            print("Nginx stream 已接管 TCP 443；现在安装 NaiveProxy 后端。", flush=True)
+        except BaseException:
+            self.rollback()
+            raise
+
+    def rollback(self):
+        if self.unit_written:
+            result = subprocess.run(["systemctl", "disable", "--now", SERVICE], capture_output=True)
+            if result.returncode and subprocess.run(["systemctl", "is-active", "--quiet", SERVICE]).returncode == 0:
+                raise StreamError("无法停止 stream，未恢复 Xray 以免争抢 443；请人工检查备份。")
+        if self.xray:
+            self.xray.restore()
+        for path in reversed(self.created):
+            path.unlink(missing_ok=True)
+        self.created.clear()
+        if self.unit_written:
+            run(["systemctl", "daemon-reload"])
+        self.unit_written = False
+NAIVE_STREAM_PAYLOAD
 
 # Both payloads must be complete and match their build-time digest before any install.
 (cd "$naive_stage_dir" && sha256sum --check --status <<'NAIVE_PAYLOAD_HASHES'
-9df3f514ed063db1f59aa1f377b44d798a508e27340f6fcfa26b00f83522ead7  naive-manager.py
-9205230f00f262301e51f0b28c78018a5ffd34351052bbaf114e6bce7325438b  installer.py
+59fa205f0ac735cebe67f142baab2c415906e4de7c5a7a18de8027af7af916b3  naive-manager.py
+29b52b6bfcf310778c549f328f6ea20f33ab7b456ca3c35fc4a41f0545dec742  installer.py
+178a8ff20a2278904eb2b3b3d44d06a00336ddef3658db1974414c89652364eb  stream_support.py
 NAIVE_PAYLOAD_HASHES
 ) || { echo '脚本内容不完整或校验失败，没有开始安装。' >&2; exit 1; }
 
@@ -997,6 +1440,7 @@ naive_missing=()
 for naive_command in python3 nano; do
   command -v "$naive_command" >/dev/null || naive_missing+=("$naive_command")
 done
+command -v ss >/dev/null || naive_missing+=(iproute2)
 dpkg-query -W -f='${Status}' ca-certificates 2>/dev/null | grep -q 'install ok installed' || naive_missing+=(ca-certificates)
 if [[ "${#naive_missing[@]}" -gt 0 ]]; then
   if [[ "$naive_check_only" -eq 1 ]]; then
