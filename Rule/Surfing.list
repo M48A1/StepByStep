@@ -1,1 +1,37 @@
+# blog
+DOMAIN,blog.sinohyper.com
 
+# sb.sb
+DOMAIN-SUFFIX,sb.sb
+
+# bo.ke
+DOMAIN-SUFFIX,bo.ke
+
+# yandex
+DOMAIN-SUFFIX,yandex.com
+
+# wiki
+DOMAIN-SUFFIX,wikipedia.org
+DOMAIN-SUFFIX,wikimedia.org
+
+# Surfing
+DOMAIN-SUFFIX,2libra.com
+DOMAIN-SUFFIX,vercel.app
+DOMAIN-SUFFIX,vercel.com
+DOMAIN-SUFFIX,nssurge.com
+DOMAIN-SUFFIX,v2ex.com
+DOMAIN-KEYWORD,v2ex
+DOMAIN-SUFFIX,nodeseek.com
+DOMAIN-SUFFIX,nodeimage.com
+DOMAIN-SUFFIX,greasyfork.org
+DOMAIN-KEYWORD,greasyfork
+DOMAIN-SUFFIX,mozilla.org
+DOMAIN-SUFFIX,yahoo.com
+DOMAIN-SUFFIX,gitlab.com
+DOMAIN-SUFFIX,imgur.com
+DOMAIN-SUFFIX,kagi.com
+DOMAIN-SUFFIX,weather-in-calendar.com
+
+# Fut
+DOMAIN-SUFFIX,fut.gg
+DOMAIN-SUFFIX,futbin.com
