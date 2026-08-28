@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# NaiveProxy OneClick v2.0.0 — Debian/Ubuntu x86_64 + systemd
+# NaiveProxy OneClick v2.0.1 — Debian/Ubuntu x86_64 + systemd
 # Public installer only: no account password, SSH key or fixed server domain.
 # Downloaded official binaries are verified against GitHub API SHA-256 digests.
 set -Eeuo pipefail
@@ -7,7 +7,7 @@ set -Eeuo pipefail
 case "${1:-}" in
   --help|-h)
     cat <<'NAIVE_HELP'
-NaiveProxy + Nginx stream 一键安装 v2.0.0
+NaiveProxy + Nginx stream 一键安装 v2.0.1
 支持：Debian/Ubuntu x86_64、root、systemd、公网 IPv4。
 公网 TCP 443 → Nginx stream；Naive 127.0.0.1:8443；VLESS 127.0.0.1:9443。
 无需占用 80，不提供 UDP/QUIC；客户端仍连接公网 443。
@@ -31,7 +31,7 @@ NaiveProxy + Nginx stream 一键安装 v2.0.0
 NAIVE_HELP
     exit 0
     ;;
-  --version) echo '2.0.0'; exit 0 ;;
+  --version) echo '2.0.1'; exit 0 ;;
 esac
 
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || { echo '仅支持 Linux x86_64。' >&2; exit 1; }
@@ -67,7 +67,7 @@ import sys
 import tempfile
 from urllib.parse import quote, urlencode
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 AUTH_LINE = re.compile(r"(?m)^(?P<indent>[ \t]*)basic_auth[ \t]+(?P<args>[^\n]+)$")
 SITE_LINE = re.compile(r"(?m)^[ \t]*:(\d+)[ \t]*,[ \t]*([A-Za-z0-9.-]+)(?::(\d+))?[ \t]*\{[ \t]*$")
 MANAGED_FILES = ("Caddyfile", "client.json", "shadowrocket-http2.txt")
@@ -526,7 +526,11 @@ class Manager(_DirectManager):
             expected = re.escape(info["domain"]) + r"\s+127\.0\.0\.1:8443;"
             if not re.search(expected, conf.read_text()):
                 raise ManagerError("Nginx 分流与 Naive 域名不一致。")
-            self.command(["/usr/sbin/nginx", "-t", "-c", str(conf)])
+            # Checking must work while stopped, without creating a root-owned
+            # PID in systemd's RuntimeDirectory or touching another nginx PID.
+            with tempfile.TemporaryDirectory(prefix="naive-nginx-check-") as temporary:
+                pid = Path(temporary) / "nginx.pid"
+                self.command(["/usr/sbin/nginx", "-t", "-c", str(conf), "-g", f"pid {pid};"])
 
     def dispatch(self, action, argument=None):
         if parse_config(self.read()).get("backend_port"):
@@ -571,7 +575,7 @@ import time
 import urllib.request
 import stream_support as stream
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 MANAGER_SOURCE = Path(__file__).with_name("naive-manager.py")
 RELEASE_API = "https://api.github.com/repos/klzgrad/forwardproxy/releases/latest"
 
@@ -1275,7 +1279,7 @@ def nginx_config(domain, has_xray, module=True, ipv6=True, front=443, naive=8443
     if not re.fullmatch(r"[a-z0-9.-]+", domain):
         raise StreamError("无效的分流域名。")
     return ((f"load_module {MODULE};\n" if module else "") + f'''worker_processes auto;
-pid /run/naive-stream/nginx.pid;
+# PID location is supplied by systemd; standalone checks use a temporary PID.
 error_log stderr warn;
 events {{ worker_connections 4096; }}
 stream {{
@@ -1304,8 +1308,8 @@ Type=simple
 User=naiveproxy
 Group=naiveproxy
 RuntimeDirectory=naive-stream
-ExecStartPre=/usr/sbin/nginx -t -c /etc/naive-stream/nginx.conf
-ExecStart=/usr/sbin/nginx -c /etc/naive-stream/nginx.conf -g 'daemon off;'
+ExecStartPre=/usr/sbin/nginx -t -c /etc/naive-stream/nginx.conf -g 'pid /run/naive-stream/nginx.pid;'
+ExecStart=/usr/sbin/nginx -c /etc/naive-stream/nginx.conf -g 'pid /run/naive-stream/nginx.pid; daemon off;'
 ExecReload=/bin/kill -HUP $MAINPID
 KillSignal=SIGQUIT
 TimeoutStopSec=15s
@@ -1358,6 +1362,14 @@ def ipv6_enabled():
         return False
 
 
+def check_nginx_config(path, binary="/usr/sbin/nginx"):
+    # RuntimeDirectory is created only when systemd starts the service. Do not
+    # create its PID as root: that also prevents the unprivileged service start.
+    with tempfile.TemporaryDirectory(prefix="naive-nginx-check-") as temporary:
+        pid = Path(temporary) / "nginx.pid"
+        run([str(binary), "-t", "-c", str(path), "-g", f"pid {pid};"])
+
+
 class StreamSetup:
     def __init__(self, domain, xray=None, root=Path("/")):
         self.domain, self.xray, self.root = domain, xray, root
@@ -1385,14 +1397,21 @@ class StreamSetup:
         # All potentially slow package/download/config validation precedes disruption.
         ensure_nginx()
         try:
-            self.path(CONF).parent.mkdir(parents=True, mode=0o755, exist_ok=True)
+            directory = self.path(CONF).parent
+            if directory.is_symlink():
+                raise StreamError("stream 配置目录不能是符号链接。")
+            directory.mkdir(parents=True, mode=0o755, exist_ok=True)
+            if directory.stat().st_uid != os.geteuid():
+                raise StreamError("stream 配置目录必须属于安装者 root。")
+            # The installer uses umask 077, but the service runs as naiveproxy.
+            directory.chmod(0o755)
             for name, data in ((CONF, nginx_config(self.domain, bool(self.xray), ipv6=ipv6_enabled())), (UNIT_PATH, UNIT)):
                 path = self.path(name)
                 with path.open("x") as stream:
                     self.created.append(path)
                     stream.write(data)
                 path.chmod(0o644)
-            run(["/usr/sbin/nginx", "-t", "-c", str(self.path(CONF))])
+            check_nginx_config(self.path(CONF))
             run(["systemd-analyze", "verify", str(self.path(UNIT_PATH))])
             self.unit_written = True
             run(["systemctl", "daemon-reload"])
@@ -1424,11 +1443,11 @@ class StreamSetup:
         self.unit_written = False
 NAIVE_STREAM_PAYLOAD
 
-# Both payloads must be complete and match their build-time digest before any install.
+# All payloads must be complete and match their build-time digest before any install.
 (cd "$naive_stage_dir" && sha256sum --check --status <<'NAIVE_PAYLOAD_HASHES'
-59fa205f0ac735cebe67f142baab2c415906e4de7c5a7a18de8027af7af916b3  naive-manager.py
-29b52b6bfcf310778c549f328f6ea20f33ab7b456ca3c35fc4a41f0545dec742  installer.py
-178a8ff20a2278904eb2b3b3d44d06a00336ddef3658db1974414c89652364eb  stream_support.py
+8b294838e7f3e2233f161268ee9b4a7f241871ac57cf3a2e604353cf3e4580cf  naive-manager.py
+5f862aeb93657d1b0f22e2c57d6f8e6145daff53ff4d746472421e1fd522f267  installer.py
+2cf28fb180e1757ed4f3fba5779e5ca92fbad6c9d9d6162b46f5b2921cd2cbcf  stream_support.py
 NAIVE_PAYLOAD_HASHES
 ) || { echo '脚本内容不完整或校验失败，没有开始安装。' >&2; exit 1; }
 
