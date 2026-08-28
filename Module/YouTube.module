@@ -1,24 +1,26 @@
 #!name=YouTube
-#!desc=ShadowrocketYouTube
+#!desc=YouTube 
 
-[URL Rewrite]
 
-(^https?:\/\/[\w-]+\.googlevideo\.com\/(?!dclk_video_ads).+?)&ctier=L(&.+?),ctier,(.+) $1$2$3 302
+[Rule]
 
-^https?:\/\/[\w-]+\.googlevideo\.com\/(?!(dclk_video_ads|videoplayback\?)).+&oad _ reject-200
-
-^https?:\/\/(www|s)\.youtube\.com\/api\/stats\/ads _ reject-200
-
-^https?:\/\/(www|s)\.youtube\.com\/(pagead|ptracking) _ reject-200
-
-^https?:\/\/s\.youtube\.com\/api\/stats\/qoe\?adcontext _ reject-200
+# 禁止 YouTube QUIC / HTTP3，强制回落 TCP
+AND,((DOMAIN-SUFFIX,googlevideo.com),(PROTOCOL,UDP)),REJECT-NO-DROP
+AND,((DOMAIN,youtubei.googleapis.com),(PROTOCOL,UDP)),REJECT-NO-DROP
 
 
 [Script]
 
-YouTube = type=http-response,pattern=^https:\/\/youtubei\.googleapis\.com\/(youtubei\/v1\/(browse|next|player|search|reel\/reel_watch_sequence|guide|account\/get_setting|get_watch))(\?(.*))?$,requires-body=1,max-size=-1,binary-body-mode=1,script-path=https://raw.githubusercontent.com/Maasea/sgmodule/master/Script/Youtube/youtube.response.js,argument="{"lyricLang":"off","captionLang":"off","blockUpload":true,"blockImmersive":false,"blockShorts":true,"debug":false}"
+# YouTube API 响应处理
+YouTube.response = type=http-response,pattern=^https:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/(browse|next|player|search|reel\/reel_watch_sequence|guide|account\/get_setting|get_watch|log_event|config)(\?.*)?$,requires-body=1,max-size=-1,binary-body-mode=1,script-path=https://raw.githubusercontent.com/Maasea/sgmodule/master/Script/Youtube/youtube.response.js,argument="{"captionLang":"off","blockUpload":true,"blockImmersive":false,"blockShorts":true,"debug":false}"
+
+# GoogleVideo 播放请求处理
+YouTube.request.init = type=http-request,pattern=^https?:\/\/[\w-]+\.googlevideo\.com\/initplayback.+&ack.*,requires-body=1,max-size=-1,binary-body-mode=1,script-path=https://raw.githubusercontent.com/Maasea/sgmodule/master/Script/Youtube/youtube.request.js,argument="{"captionLang":"off"}"
+
+# YouTube 日志请求处理
+YouTube.request.log_event = type=http-request,pattern=^https:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/log_event,requires-body=1,max-size=-1,binary-body-mode=1,script-path=https://raw.githubusercontent.com/Maasea/sgmodule/master/Script/Youtube/youtube.request.js
 
 
 [MITM]
 
-hostname = %APPEND% -redirector*.googlevideo.com,*.googlevideo.com,www.youtube.com,s.youtube.com,youtubei.googleapis.com
+hostname = %APPEND% *.googlevideo.com,youtubei.googleapis.com
