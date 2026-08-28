@@ -1,1 +1,24 @@
+#!name=YouTube
+#!desc=YouTube 
 
+[URL Rewrite]
+
+^https?:\/\/[\w-]+\.googlevideo\.com\/(?!dclk_video_ads).+?&ctier=L(&.+?),ctier,(.+) https://$1$2$3 302
+
+^https?:\/\/[\w-]+\.googlevideo\.com\/(?!(dclk_video_ads|videoplayback\?)).+&oad _ reject-200
+
+^https?:\/\/(www|s)\.youtube\.com\/api\/stats\/ads _ reject-200
+
+^https?:\/\/(www|s)\.youtube\.com\/(pagead|ptracking) _ reject-200
+
+^https?:\/\/s\.youtube\.com\/api\/stats\/qoe\?adcontext _ reject-200
+
+
+[Script]
+
+YouTube = type=http-response,pattern=^https:\/\/youtubei\.googleapis\.com\/youtubei\/v1\/(browse|next|player|search|reel\/reel_watch_sequence|guide|account\/get_setting|get_watch),requires-body=1,max-size=-1,binary-body-mode=1,script-path=https://raw.githubusercontent.com/ZenmoFeiShi/Qx/refs/heads/main/youtube.response.js
+
+
+[MITM]
+
+hostname = %APPEND% *.googlevideo.com,redirector*.googlevideo.com,www.youtube.com,s.youtube.com,youtubei.googleapis.com
