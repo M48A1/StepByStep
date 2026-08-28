@@ -1,7 +1,7 @@
-#!name=哲也同学（知乎净化）
-#!desc=知乎去广告、内容净化及本地功能增强（Shadowrocket 模块）
-#!author=哲也同学 / Shadowrocket format conversion
-#!category=去广告
+#!name=zhihu
+#!desc=zhihu
+#!author=zheye / Shadowrocket format conversion
+
 
 [URL Rewrite]
 # 拦截异常地址
