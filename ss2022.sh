@@ -163,6 +163,9 @@ if [[ -s "$CONF_FILE" && "${SS_FORCE:-0}" != 1 ]]; then
 else
   write_config "$bind"
 fi
+# 安装器和服务均以 root 运行，配置仅允许 root 读取。
+chown root:root "$CONF_FILE"
+chmod 600 "$CONF_FILE"
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -174,7 +177,7 @@ Wants=network-online.target
 ExecStart=${BIN} -c ${CONF_FILE}
 Restart=on-failure
 RestartSec=3
-User=nobody
+User=root
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
