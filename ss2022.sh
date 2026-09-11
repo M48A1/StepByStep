@@ -59,18 +59,41 @@ EOF
 menu() {
   while true; do
     printf '\n==== Shadowsocks 2022 管理菜单 ====\n'
-    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 卸载\n0) 退出\n\n'
-    read -r -p '请选择 [0-5]：' action
+    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 卸载\n0) 退出\n\n'
+    read -r -p '请选择 [0-6]：' action
     case "${action:-0}" in
       1) install_server ;;
       2) systemctl status "${APP}.service" --no-pager || true ;;
       3) systemctl restart "${APP}.service" && log '服务已重启' || true ;;
       4) journalctl -u "${APP}.service" -n 80 --no-pager || true ;;
-      5) uninstall_server; exit 0 ;;
+      5) show_node ;;
+      6) uninstall_server; exit 0 ;;
       0) exit 0 ;;
       *) printf '无效选项\n' ;;
     esac
   done
+}
+
+show_node() {
+  [[ -s "$CONF_FILE" ]] || { log '尚未安装或配置文件不存在'; return 0; }
+  local port_value method_value password_value host_value encoded uri
+  port_value="$(sed -n 's/.*"server_port":[[:space:]]*\([0-9]*\).*/\1/p' "$CONF_FILE" | head -1)"
+  method_value="$(sed -n 's/.*"method":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
+  password_value="$(sed -n 's/.*"password":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
+  host_value="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$host_value" ]] || host_value='请替换为服务器 IP 或域名'
+  encoded="$(printf '%s' "${method_value}:${password_value}" | base64 | tr '+/' '-_' | tr -d '=\n')"
+  uri="ss://${encoded}@${host_value}:${port_value}"
+  printf '\n===== SS2022 节点配置 =====\n'
+  printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host_value" "$port_value" "$method_value" "$password_value" "$uri"
+  printf '\n原始配置文件：\n'
+  sed 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password": "********"/g' "$CONF_FILE"
+  if command -v qrencode >/dev/null 2>&1; then
+    printf '\n二维码：\n'
+    qrencode -t ANSIUTF8 "$uri"
+  else
+    printf '\n未检测到 qrencode，无法显示终端二维码。Debian/Ubuntu 可执行：\n  sudo apt-get install -y qrencode\n'
+  fi
 }
 
 uninstall_server() {
