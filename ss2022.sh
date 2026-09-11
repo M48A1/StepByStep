@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.0.0 | Date: 2026-09-11
+# Version: 1.0.1 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.0.0"
+readonly SCRIPT_VERSION="1.0.1"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -151,8 +151,10 @@ if [[ "${1:-}" == "uninstall" ]]; then uninstall_server; exit 0; fi
 
 detect_arch() {
   case "$(uname -m)" in
-    x86_64|amd64) echo "x86_64-unknown-linux-gnu" ;;
-    aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+    # 使用静态链接的 musl 构建，避免旧版 Debian/Ubuntu 的 glibc
+    # 无法运行上游 GNU 构建。
+    x86_64|amd64) echo "x86_64-unknown-linux-musl" ;;
+    aarch64|arm64) echo "aarch64-unknown-linux-musl" ;;
     *) die "不支持的架构：$(uname -m)，目前支持 x86_64 和 arm64" ;;
   esac
 }
@@ -196,6 +198,7 @@ curl --fail --location --retry 3 --proto '=https' --tlsv1.2 -o "${tmp}/${archive
 tar -xJf "${tmp}/${archive}" -C "$tmp"
 found="$(find "$tmp" -type f -name ssserver -perm -u+x -print -quit)"
 [[ -n "$found" ]] || die "压缩包中找不到 ssserver"
+"$found" --version >/dev/null || die "下载的 ssserver 无法在当前系统运行"
 install -m 0755 "$found" "$BIN"
 # 提前安装管理命令，即使服务启动失败，也能通过 ss2022 查看状态和日志。
 install -m 0755 "$0" "$MANAGER"
