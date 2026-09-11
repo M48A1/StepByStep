@@ -156,6 +156,8 @@ tar -xJf "${tmp}/${archive}" -C "$tmp"
 found="$(find "$tmp" -type f -name ssserver -perm -u+x -print -quit)"
 [[ -n "$found" ]] || die "压缩包中找不到 ssserver"
 install -m 0755 "$found" "$BIN"
+# 提前安装管理命令，即使服务启动失败，也能通过 ss2022 查看状态和日志。
+install -m 0755 "$0" "$MANAGER"
 
 mkdir -p "$CONF_DIR"
 if [[ -s "$CONF_FILE" && "${SS_FORCE:-0}" != 1 ]]; then
@@ -192,8 +194,6 @@ EOF
 systemctl daemon-reload
 systemctl enable --now "${APP}.service"
 systemctl is-active --quiet "${APP}.service" || { systemctl status "${APP}.service" --no-pager; exit 1; }
-
-install -m 0755 "$0" "$MANAGER"
 
 ip="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 log "安装完成，监听：${port} / ${method}"
