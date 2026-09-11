@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.1.0 | Date: 2026-09-11
+# Version: 1.1.1 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_VERSION="1.1.1"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -165,7 +165,13 @@ uninstall_server() {
   log "已卸载 ${APP}（不会修改防火墙规则）"
 }
 
-[[ "${EUID}" -eq 0 ]] || die "请使用 root 运行：sudo bash ss2022.sh"
+if [[ "${EUID}" -ne 0 ]]; then
+  if [[ "$(basename "$0")" == "ss2022" ]]; then
+    command -v sudo >/dev/null 2>&1 || die "需要 root 权限，且系统未安装 sudo"
+    exec sudo -- "$0" "$@"
+  fi
+  die "首次安装请使用 root 权限运行"
+fi
 command -v systemctl >/dev/null || die "此脚本需要 systemd"
 
 detect_arch() {
