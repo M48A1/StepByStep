@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.0.2 | Date: 2026-09-11
+# Version: 1.1.0 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.0.2"
+readonly SCRIPT_VERSION="1.1.0"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -77,6 +77,23 @@ menu() {
   done
 }
 
+usage() {
+  cat <<EOF
+用法：
+  ss2022                 打开管理菜单
+  ss2022 show            显示节点配置和二维码
+  ss2022 status          查看服务状态
+  ss2022 restart         重启服务
+  ss2022 logs            查看最近日志
+  ss2022 config          检查或删除配置
+  ss2022 install         安装或重新安装
+  ss2022 uninstall       完整卸载
+  ss2022 version         显示脚本版本
+
+也可以使用 bash ss2022.sh 进行首次安装。
+EOF
+}
+
 inspect_config() {
   if [[ ! -f "$CONF_FILE" ]]; then
     log "配置文件不存在：$CONF_FILE"
@@ -106,6 +123,8 @@ preflight_check() {
       rm -f "$SERVICE_FILE" "$BIN" "$MANAGER"
       rm -rf "$CONF_DIR"
       systemctl daemon-reload
+      # 立即恢复新版管理命令，后续下载或启动失败时仍可进入菜单排障。
+      install -m 0755 "$installer_source" "$MANAGER"
       log '旧服务、程序和配置已全部删除，将重新安装'
     else
       log '保留旧配置，安装时不会覆盖密码和端口'
@@ -149,8 +168,6 @@ uninstall_server() {
 [[ "${EUID}" -eq 0 ]] || die "请使用 root 运行：sudo bash ss2022.sh"
 command -v systemctl >/dev/null || die "此脚本需要 systemd"
 
-if [[ "${1:-}" == "uninstall" ]]; then uninstall_server; exit 0; fi
-
 detect_arch() {
   case "$(uname -m)" in
     # 使用静态链接的 musl 构建，避免旧版 Debian/Ubuntu 的 glibc
@@ -191,6 +208,8 @@ trap 'rm -rf "$tmp"' EXIT
 # 删除旧安装前保存当前安装器；脚本可能正从 $MANAGER 运行。
 installer_source="${tmp}/ss2022"
 install -m 0755 "$0" "$installer_source"
+# 安装流程一开始就落地管理命令，后续任一步失败仍可使用 ss2022 排障。
+install -m 0755 "$installer_source" "$MANAGER"
 preflight_check || return 0
 install_tools
 choose_bind
@@ -251,8 +270,28 @@ log "服务管理：systemctl status ${APP}; journalctl -u ${APP} -e"
 printf '\n客户端参数（请妥善保管）：\n  server: %s\n  port: %s\n  method: %s\n  password: %s\n' "${ip:-你的服务器IP}" "$port" "$method" "$(sed -n 's/.*"password": "\([^"]*\)".*/\1/p' "$CONF_FILE")"
 }
 
-if [[ "$(basename "$0")" == "ss2022" ]]; then
-  menu
-else
-  install_server
-fi
+dispatch() {
+  local command_name="${1:-}"
+  case "$command_name" in
+    "")
+      if [[ "$(basename "$0")" == "ss2022" ]]; then
+        menu
+      else
+        install_server
+      fi
+      ;;
+    menu) menu ;;
+    show|qr) show_node ;;
+    status) systemctl status "${APP}.service" --no-pager ;;
+    restart) systemctl restart "${APP}.service" && log '服务已重启' ;;
+    logs) journalctl -u "${APP}.service" -n 80 --no-pager ;;
+    config) inspect_config ;;
+    install) install_server ;;
+    uninstall) uninstall_server ;;
+    version|-v|--version) printf '%s %s\n' "$APP" "$SCRIPT_VERSION" ;;
+    help|-h|--help) usage ;;
+    *) usage; return 1 ;;
+  esac
+}
+
+dispatch "$@"
