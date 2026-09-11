@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.1.2 | Date: 2026-09-11
+# Version: 1.2.0 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.1.2"
+readonly SCRIPT_VERSION="1.2.0"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -20,9 +20,73 @@ die() { printf '[%s] ERROR: %s\n' "$APP" "$*" >&2; exit 1; }
 trap 'die "安装失败，出错行：${LINENO}"' ERR
 
 install_manager_command() {
-  local source_path="${1:-${BASH_SOURCE[0]:-$0}}"
-  [[ -r "$source_path" ]] || die "无法读取管理脚本来源：$source_path"
-  install -m 0755 "$source_path" "$MANAGER"
+  cat > "$MANAGER" <<'SS2022_MANAGER_EOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+readonly VERSION="1.2.0"
+readonly CONF_FILE="/etc/shadowsocks-rust/config.json"
+log() { printf '[ss2022] %s\n' "$*"; }
+die() { printf '[ss2022] ERROR: %s\n' "$*" >&2; exit 1; }
+
+show_node() {
+  [[ -s "$CONF_FILE" ]] || die "配置文件不存在：$CONF_FILE"
+  local port method password host encoded uri
+  port="$(sed -n 's/.*"server_port":[[:space:]]*\([0-9]*\).*/\1/p' "$CONF_FILE" | head -1)"
+  method="$(sed -n 's/.*"method":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
+  password="$(sed -n 's/.*"password":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
+  [[ -n "$port" && -n "$method" && -n "$password" ]] || die '无法解析配置文件'
+  host="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [[ -n "$host" ]] || host='请替换为服务器IP或域名'
+  encoded="$(printf '%s' "${method}:${password}" | base64 | tr '+/' '-_' | tr -d '=\n')"
+  uri="ss://${encoded}@${host}:${port}"
+  printf '\n===== SS2022 节点信息 =====\n'
+  printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host" "$port" "$method" "$password" "$uri"
+  if command -v qrencode >/dev/null 2>&1; then printf '\n二维码：\n'; qrencode -t ANSIUTF8 "$uri"; fi
+}
+
+show_config() {
+  [[ -f "$CONF_FILE" ]] || die "配置文件不存在：$CONF_FILE"
+  sed 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password": "********"/g' "$CONF_FILE"
+}
+
+uninstall_server() {
+  read -r -p '输入 DELETE 确认完整卸载：' confirm
+  [[ "$confirm" == DELETE ]] || { log '已取消'; return; }
+  systemctl disable --now ss2022.service 2>/dev/null || true
+  rm -f /etc/systemd/system/ss2022.service /usr/local/bin/ssserver
+  rm -rf /etc/shadowsocks-rust
+  systemctl daemon-reload
+  log '服务、程序和配置已删除'
+}
+
+menu() {
+  while true; do
+    printf '\n==== Shadowsocks 2022 管理菜单 v%s ====\n' "$VERSION"
+    printf '1) 查看节点配置 / 二维码\n2) 查看服务状态\n3) 重启服务\n4) 查看日志\n5) 查看配置文件（隐藏密码）\n6) 卸载\n0) 退出\n\n'
+    read -r -p '请选择 [0-6]：' choice
+    case "${choice:-0}" in
+      1) show_node ;; 2) systemctl status ss2022.service --no-pager || true ;;
+      3) systemctl restart ss2022.service && log '服务已重启' ;;
+      4) journalctl -u ss2022.service -n 80 --no-pager ;;
+      5) show_config ;; 6) uninstall_server ;; 0) exit 0 ;; *) log '无效选项' ;;
+    esac
+  done
+}
+
+if [[ "${EUID}" -ne 0 ]]; then
+  command -v sudo >/dev/null 2>&1 || die '请使用 root 运行'
+  exec sudo -- "$0" "$@"
+fi
+case "${1:-}" in
+  ""|menu) menu ;; show|qr) show_node ;; config) show_config ;;
+  status) systemctl status ss2022.service --no-pager ;;
+  restart) systemctl restart ss2022.service && log '服务已重启' ;;
+  logs) journalctl -u ss2022.service -n 80 --no-pager ;;
+  uninstall) uninstall_server ;; version|-v|--version) printf 'ss2022 %s\n' "$VERSION" ;;
+  *) printf '用法：ss2022 [menu|show|config|status|restart|logs|uninstall|version]\n'; exit 1 ;;
+esac
+SS2022_MANAGER_EOF
+  chmod 0755 "$MANAGER"
   [[ -x "$MANAGER" ]] || die "管理命令安装失败：$MANAGER"
   log "管理命令已安装：ss2022"
 }
