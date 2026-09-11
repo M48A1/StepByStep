@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.2.0 | Date: 2026-09-11
+# Version: 1.2.1 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.2.0"
+readonly SCRIPT_VERSION="1.2.1"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -23,7 +23,7 @@ install_manager_command() {
   cat > "$MANAGER" <<'SS2022_MANAGER_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-readonly VERSION="1.2.0"
+readonly VERSION="1.2.1"
 readonly CONF_FILE="/etc/shadowsocks-rust/config.json"
 log() { printf '[ss2022] %s\n' "$*"; }
 die() { printf '[ss2022] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -41,7 +41,12 @@ show_node() {
   uri="ss://${encoded}@${host}:${port}"
   printf '\n===== SS2022 节点信息 =====\n'
   printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host" "$port" "$method" "$password" "$uri"
-  if command -v qrencode >/dev/null 2>&1; then printf '\n二维码：\n'; qrencode -t ANSIUTF8 "$uri"; fi
+  if command -v qrencode >/dev/null 2>&1; then
+    printf '\n二维码：\n'
+    qrencode -t ANSIUTF8 "$uri"
+  else
+    log '未安装 qrencode，暂时无法输出二维码'
+  fi
 }
 
 show_config() {
@@ -262,10 +267,15 @@ install_tools() {
   case "$id" in
     debian|ubuntu|linuxmint)
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl
+      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl qrencode
       ;;
     rocky|almalinux|centos|rhel|fedora)
       (command -v dnf >/dev/null && dnf install -y curl ca-certificates openssl) || yum install -y curl ca-certificates openssl
+      if command -v dnf >/dev/null; then
+        dnf install -y qrencode || log 'qrencode 安装失败，将只输出节点链接'
+      else
+        yum install -y qrencode || log 'qrencode 安装失败，将只输出节点链接'
+      fi
       ;;
     *)
       command -v curl >/dev/null || die "请先安装 curl、ca-certificates 和 openssl"
@@ -347,6 +357,7 @@ log "配置文件：${CONF_FILE}"
 log "服务管理：systemctl status ${APP}; journalctl -u ${APP} -e"
 log "以后直接输入 ss2022 打开管理菜单"
 printf '\n客户端参数（请妥善保管）：\n  server: %s\n  port: %s\n  method: %s\n  password: %s\n' "${ip:-你的服务器IP}" "$port" "$method" "$(sed -n 's/.*"password": "\([^"]*\)".*/\1/p' "$CONF_FILE")"
+show_node
 }
 
 dispatch() {
