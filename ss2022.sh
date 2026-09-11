@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.0.1 | Date: 2026-09-11
+# Version: 1.0.2 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.0.1"
+readonly SCRIPT_VERSION="1.0.2"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -100,11 +100,13 @@ preflight_check() {
     printf '\n检测到已有配置文件：%s\n' "$CONF_FILE"
     printf '当前配置（密码已隐藏）：\n'
     sed 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password": "********"/g' "$CONF_FILE"
-    read -r -p '是否删除现有配置后重新安装？[y/N]：' delete_old
+    read -r -p '是否删除整个旧安装后重新安装？[y/N]：' delete_old
     if [[ "$delete_old" =~ ^[Yy]$ ]]; then
       systemctl disable --now "${APP}.service" 2>/dev/null || true
-      rm -f "$CONF_FILE"
-      log '旧配置已删除，将生成新配置'
+      rm -f "$SERVICE_FILE" "$BIN" "$MANAGER"
+      rm -rf "$CONF_DIR"
+      systemctl daemon-reload
+      log '旧服务、程序和配置已全部删除，将重新安装'
     else
       log '保留旧配置，安装时不会覆盖密码和端口'
     fi
@@ -184,12 +186,15 @@ method="${SS_METHOD:-$DEFAULT_METHOD}"
 [[ "$method" == "$DEFAULT_METHOD" ]] || die "目前只允许使用 $DEFAULT_METHOD"
 
 install_server() {
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# 删除旧安装前保存当前安装器；脚本可能正从 $MANAGER 运行。
+installer_source="${tmp}/ss2022"
+install -m 0755 "$0" "$installer_source"
 preflight_check || return 0
 install_tools
 choose_bind
 target="$(detect_arch)"
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
 archive="shadowsocks-v${version}.${target}.tar.xz"
 url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${version}/${archive}"
 
@@ -201,7 +206,7 @@ found="$(find "$tmp" -type f -name ssserver -perm -u+x -print -quit)"
 "$found" --version >/dev/null || die "下载的 ssserver 无法在当前系统运行"
 install -m 0755 "$found" "$BIN"
 # 提前安装管理命令，即使服务启动失败，也能通过 ss2022 查看状态和日志。
-install -m 0755 "$0" "$MANAGER"
+install -m 0755 "$installer_source" "$MANAGER"
 
 mkdir -p "$CONF_DIR"
 if [[ -s "$CONF_FILE" && "${SS_FORCE:-0}" != 1 ]]; then
