@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.1.1 | Date: 2026-09-11
+# Version: 1.1.2 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.1.1"
+readonly SCRIPT_VERSION="1.1.2"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -18,6 +18,14 @@ readonly DEFAULT_METHOD="2022-blake3-aes-256-gcm"
 log() { printf '[%s] %s\n' "$APP" "$*"; }
 die() { printf '[%s] ERROR: %s\n' "$APP" "$*" >&2; exit 1; }
 trap 'die "安装失败，出错行：${LINENO}"' ERR
+
+install_manager_command() {
+  local source_path="${1:-${BASH_SOURCE[0]:-$0}}"
+  [[ -r "$source_path" ]] || die "无法读取管理脚本来源：$source_path"
+  install -m 0755 "$source_path" "$MANAGER"
+  [[ -x "$MANAGER" ]] || die "管理命令安装失败：$MANAGER"
+  log "管理命令已安装：ss2022"
+}
 
 choose_bind() {
   printf '\n请选择监听地址：\n  1) IPv4\n  2) IPv6\n  3) IPv4 + IPv6（双栈）\n\n'
@@ -124,7 +132,7 @@ preflight_check() {
       rm -rf "$CONF_DIR"
       systemctl daemon-reload
       # 立即恢复新版管理命令，后续下载或启动失败时仍可进入菜单排障。
-      install -m 0755 "$installer_source" "$MANAGER"
+      install_manager_command "$installer_source"
       log '旧服务、程序和配置已全部删除，将重新安装'
     else
       log '保留旧配置，安装时不会覆盖密码和端口'
@@ -213,9 +221,9 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 # 删除旧安装前保存当前安装器；脚本可能正从 $MANAGER 运行。
 installer_source="${tmp}/ss2022"
-install -m 0755 "$0" "$installer_source"
+install -m 0755 "${BASH_SOURCE[0]:-$0}" "$installer_source"
 # 安装流程一开始就落地管理命令，后续任一步失败仍可使用 ss2022 排障。
-install -m 0755 "$installer_source" "$MANAGER"
+install_manager_command "$installer_source"
 preflight_check || return 0
 install_tools
 choose_bind
@@ -231,7 +239,7 @@ found="$(find "$tmp" -type f -name ssserver -perm -u+x -print -quit)"
 "$found" --version >/dev/null || die "下载的 ssserver 无法在当前系统运行"
 install -m 0755 "$found" "$BIN"
 # 提前安装管理命令，即使服务启动失败，也能通过 ss2022 查看状态和日志。
-install -m 0755 "$installer_source" "$MANAGER"
+install_manager_command "$installer_source"
 
 mkdir -p "$CONF_DIR"
 if [[ -s "$CONF_FILE" && "${SS_FORCE:-0}" != 1 ]]; then
@@ -273,6 +281,7 @@ ip="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
 log "安装完成，监听：${port} / ${method}"
 log "配置文件：${CONF_FILE}"
 log "服务管理：systemctl status ${APP}; journalctl -u ${APP} -e"
+log "以后直接输入 ss2022 打开管理菜单"
 printf '\n客户端参数（请妥善保管）：\n  server: %s\n  port: %s\n  method: %s\n  password: %s\n' "${ip:-你的服务器IP}" "$port" "$method" "$(sed -n 's/.*"password": "\([^"]*\)".*/\1/p' "$CONF_FILE")"
 }
 
