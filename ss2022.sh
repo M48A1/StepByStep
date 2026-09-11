@@ -5,6 +5,7 @@ set -Eeuo pipefail
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
+readonly SCRIPT_VERSION="1.0.0"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -58,20 +59,52 @@ EOF
 
 menu() {
   while true; do
-    printf '\n==== Shadowsocks 2022 管理菜单 ====\n'
-    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 卸载\n0) 退出\n\n'
-    read -r -p '请选择 [0-6]：' action
+    printf '\n==== Shadowsocks 2022 管理菜单 v%s ====\n' "$SCRIPT_VERSION"
+    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 检查配置文件 / 删除配置\n7) 卸载\n0) 退出\n\n'
+    read -r -p '请选择 [0-7]：' action
     case "${action:-0}" in
       1) install_server ;;
       2) systemctl status "${APP}.service" --no-pager || true ;;
       3) systemctl restart "${APP}.service" && log '服务已重启' || true ;;
       4) journalctl -u "${APP}.service" -n 80 --no-pager || true ;;
       5) show_node ;;
-      6) uninstall_server; exit 0 ;;
+      6) inspect_config ;;
+      7) uninstall_server; exit 0 ;;
       0) exit 0 ;;
       *) printf '无效选项\n' ;;
     esac
   done
+}
+
+inspect_config() {
+  if [[ ! -f "$CONF_FILE" ]]; then
+    log "配置文件不存在：$CONF_FILE"
+    return 0
+  fi
+  printf '\n===== 当前配置文件（密码已隐藏） =====\n'
+  sed 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password": "********"/g' "$CONF_FILE"
+  printf '\n配置文件路径：%s\n' "$CONF_FILE"
+  read -r -p '是否删除当前配置文件？输入 DELETE 确认：' confirm
+  if [[ "$confirm" == "DELETE" ]]; then
+    systemctl disable --now "${APP}.service" 2>/dev/null || true
+    rm -f "$CONF_FILE"
+    log "配置文件已删除，服务已停止"
+  else
+    log "已取消删除"
+  fi
+}
+
+preflight_check() {
+  if [[ -e "$CONF_FILE" || -e "$SERVICE_FILE" || -e "$BIN" ]]; then
+    printf '\n检测到已有 SS2022 安装：\n'
+    [[ -e "$CONF_FILE" ]] && printf '  配置文件：已存在\n'
+    [[ -e "$BIN" ]] && printf '  服务程序：已存在\n'
+    [[ -e "$SERVICE_FILE" ]] && printf '  systemd 服务：已存在\n'
+    systemctl is-active --quiet "${APP}.service" && printf '  当前状态：运行中\n' || printf '  当前状态：未运行\n'
+    read -r -p '是否继续安装？已有配置默认保留 [y/N]：' proceed
+    [[ "$proceed" =~ ^[Yy]$ ]] || { log '已取消安装'; return 1; }
+  fi
+  return 0
 }
 
 show_node() {
@@ -142,6 +175,7 @@ method="${SS_METHOD:-$DEFAULT_METHOD}"
 [[ "$method" == "$DEFAULT_METHOD" ]] || die "目前只允许使用 $DEFAULT_METHOD"
 
 install_server() {
+preflight_check || return 0
 install_tools
 choose_bind
 target="$(detect_arch)"
