@@ -95,14 +95,20 @@ inspect_config() {
 }
 
 preflight_check() {
-  if [[ -e "$CONF_FILE" || -e "$SERVICE_FILE" || -e "$BIN" ]]; then
-    printf '\n检测到已有 SS2022 安装：\n'
-    [[ -e "$CONF_FILE" ]] && printf '  配置文件：已存在\n'
-    [[ -e "$BIN" ]] && printf '  服务程序：已存在\n'
-    [[ -e "$SERVICE_FILE" ]] && printf '  systemd 服务：已存在\n'
-    systemctl is-active --quiet "${APP}.service" && printf '  当前状态：运行中\n' || printf '  当前状态：未运行\n'
-    read -r -p '是否继续安装？已有配置默认保留 [y/N]：' proceed
-    [[ "$proceed" =~ ^[Yy]$ ]] || { log '已取消安装'; return 1; }
+  if [[ -e "$CONF_FILE" ]]; then
+    printf '\n检测到已有配置文件：%s\n' "$CONF_FILE"
+    printf '当前配置（密码已隐藏）：\n'
+    sed 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password": "********"/g' "$CONF_FILE"
+    read -r -p '是否删除现有配置后重新安装？[y/N]：' delete_old
+    if [[ "$delete_old" =~ ^[Yy]$ ]]; then
+      systemctl disable --now "${APP}.service" 2>/dev/null || true
+      rm -f "$CONF_FILE"
+      log '旧配置已删除，将生成新配置'
+    else
+      log '保留旧配置，安装时不会覆盖密码和端口'
+    fi
+  elif [[ -e "$SERVICE_FILE" || -e "$BIN" ]]; then
+    printf '\n检测到已有 SS2022 程序或服务，将继续安装并启动服务。\n'
   fi
   return 0
 }
