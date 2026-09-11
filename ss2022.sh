@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Version: 1.0.0 | Date: 2026-09-11
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
