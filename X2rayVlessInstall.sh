@@ -115,14 +115,16 @@ ask_settings() {
     echo "  1. www.dell.com"
     echo "  2. shopee.sg"
     echo "  3. aws.amazon.com"
-    echo "  4. 自定义"
+    echo "  4. www.lovelive-anime.jp"
+    echo "  5. 自定义"
     while true; do
         read -r -p "请选择 1-4: " choice
         case "$choice" in
             1) SNI="www.dell.com"; break ;;
             2) SNI="shopee.sg"; break ;;
             3) SNI="aws.amazon.com"; break ;;
-            4)
+            4) SNI="www.lovelive-anime.jp"; break ;;
+            5)
                 read -r -p "请输入 SNI 域名: " SNI
                 [[ "$SNI" =~ ^[A-Za-z0-9._-]+$ ]] || die "SNI 格式不正确。"
                 break
