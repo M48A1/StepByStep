@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.3.3 | Date: 2026-09-20
+# Version: 1.3.4 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.3.3"
+readonly SCRIPT_VERSION="1.3.4"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -113,7 +113,7 @@ install_manager_command() {
   cat <<'SS2022_MANAGER_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-readonly VERSION="1.3.3"
+readonly VERSION="1.3.4"
 readonly CONF_FILE="/etc/shadowsocks-rust/config.json"
 log() { printf '[ss2022] %s\n' "$*"; }
 die() { printf '[ss2022] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -412,6 +412,8 @@ method="${SS_METHOD:-$DEFAULT_METHOD}"
 [[ "$method" == "$DEFAULT_METHOD" ]] || die "目前只允许使用 $DEFAULT_METHOD"
 
 install_server() {
+log "SS2022 安装脚本版本：v${SCRIPT_VERSION}"
+log "即将安装 shadowsocks-rust：v${version}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 # 删除旧安装前保存当前安装器；脚本可能正从 $MANAGER 运行。
