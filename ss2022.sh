@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.4.0 | Date: 2026-09-20
+# Version: 1.4.1 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.4.0"
+readonly SCRIPT_VERSION="1.4.1"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -125,7 +125,7 @@ install_manager_command() (
       printf 'readonly %s=%q\n' "$key" "${!key}"
     done
     # 从内存里的函数生成完整管理命令，支持 bash <(curl ...) 和 curl | bash。
-    declare -f log die prepare_cn_acl update_cn_acl get_node_name encode_node_name install_manager_command prompt choose_bind choose_node_name write_config menu usage inspect_config preflight_check show_config show_node uninstall_server detect_arch install_tools install_server dispatch validate_config atomic_install backup_changes finish_changes restart_and_check main
+    declare -f log die prepare_cn_acl update_cn_acl get_node_name encode_node_name install_manager_command prompt choose_node_name write_config menu usage inspect_config preflight_check show_config show_node uninstall_server detect_arch install_tools install_server dispatch validate_config atomic_install backup_changes finish_changes restart_and_check main
     printf '\nif [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi\n'
   } > "$staged"
   bash -n "$staged"
@@ -145,17 +145,6 @@ prompt() {
   fi
 }
 
-choose_bind() {
-  printf '\n请选择监听地址：\n  1) IPv4\n  2) IPv6\n  3) IPv4 + IPv6（双栈）\n\n'
-  prompt '请输入选项 [1-3，默认 1]：' choice
-  case "${choice:-1}" in
-    1) bind='0.0.0.0' ;;
-    2) bind='::' ;;
-    3) bind='dual' ;;
-    *) die '无效选项' ;;
-  esac
-}
-
 choose_node_name() {
   local default_name
   default_name="$(get_node_name)"
@@ -164,32 +153,19 @@ choose_node_name() {
 }
 
 write_config() {
-  local bind_value="$1" output_file="${2:-$CONF_FILE}" password
+  local output_file="${1:-$CONF_FILE}" password
   password="${SS_PASSWORD:-$(openssl rand -base64 32 | tr -d '\n')}"
   printf '%s' "$password" | grep -Eq '^[A-Za-z0-9+/=]+$' || die '密码包含非法字符'
-  if [[ "$bind_value" == dual ]]; then
-    cat > "$output_file" <<EOF
+  cat > "$output_file" <<EOF
 {
-  "ipv6_only": true,
-  "servers": [
-    {"server": "0.0.0.0", "server_port": ${port}, "method": "${method}", "password": "${password}", "mode": "tcp_and_udp"},
-    {"server": "::", "server_port": ${port}, "method": "${method}", "password": "${password}", "mode": "tcp_and_udp"}
-  ]
-}
-EOF
-  else
-    cat > "$output_file" <<EOF
-{
-  "server": "${bind_value}",
+  "server": "0.0.0.0",
   "server_port": ${port},
   "method": "${method}",
   "password": "${password}",
   "mode": "tcp_and_udp",
-  "fast_open": false,
-  "ipv6_only": true
+  "fast_open": false
 }
 EOF
-  fi
   chmod 600 "$output_file"
 }
 
@@ -273,7 +249,7 @@ show_config() {
 show_node() {
   [[ -s "$CONF_FILE" ]] || die '尚未安装或配置文件不存在'
   command -v python3 >/dev/null || die '读取节点配置需要 python3'
-  local fields bind_value port_value method_value password_value host_value uri_host userinfo uri node_name
+  local fields bind_value port_value method_value password_value host_value uri_host userinfo uri node_name qx_name
   # JSON 解析兼容单行、缩进、单栈和双栈配置，不用 sed 猜字段。
   fields="$(python3 - "$CONF_FILE" <<'SS2022_NODE_PY'
 import json
@@ -315,8 +291,15 @@ SS2022_NODE_PY
   printf '\n===== SS2022 节点配置 =====\n'
   printf '节点名称：%s\n' "$node_name"
   printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host_value" "$port_value" "$method_value" "$password_value" "$uri"
+  # Quantumult X 原生配置使用原始 Base64 密钥，不使用 URI 的百分号编码。
+  # 逗号是字段分隔符；节点名称中的逗号和换行不能原样写入配置行。
+  qx_name="${node_name//,/，}"
+  qx_name="${qx_name//$'\r'/ }"
+  qx_name="${qx_name//$'\n'/ }"
+  printf '\nQuantumult X 配置（复制下一整行到配置文件的 [server_local] 下）：\n'
+  printf 'shadowsocks=%s:%s, method=%s, password=%s, fast-open=false, udp-relay=true, tag=%s\n' "$uri_host" "$port_value" "$method_value" "$password_value" "${qx_name:-SS2022}"
   if command -v qrencode >/dev/null 2>&1; then
-    printf '\n二维码：\n'
+    printf '\n标准 ss:// 链接二维码：\n'
     qrencode -t ANSIUTF8 "$uri"
   else
     log '未安装 qrencode，暂时无法输出二维码'
@@ -376,7 +359,7 @@ install_server() (
   set -Eeuo pipefail
   local version="${SS_VERSION:-1.25.0}" port="${SS_PORT:-$DEFAULT_PORT}" method="${SS_METHOD:-$DEFAULT_METHOD}"
   work='' changed=0 committed=0 was_active=0 was_enabled=0
-  local bind node_name target archive url found
+  local node_name target archive url found
   change_paths=()
   log "SS2022 安装脚本版本：v${SCRIPT_VERSION}"
   log "即将安装 shadowsocks-rust：v${version}"
@@ -388,7 +371,7 @@ install_server() (
   port="$((10#$port))"
   [[ "$port" -ge 1 && "$port" -le 65535 ]] || die 'SS_PORT 必须是 1-65535 的端口'
   [[ "$method" == "$DEFAULT_METHOD" ]] || die "目前只允许使用 $DEFAULT_METHOD"
-  choose_bind
+  log '监听 IPv4：0.0.0.0'
   choose_node_name
   target="$(detect_arch)"
   work="$(mktemp -d)"
@@ -404,7 +387,7 @@ install_server() (
   found="$(find "${work}/unpack" -type f -name ssserver -perm -u+x -print -quit)"
   [[ -n "$found" ]] || die '压缩包中找不到 ssserver'
   "$found" --version >/dev/null || die '下载的 ssserver 无法在当前系统运行'
-  write_config "$bind" "${work}/input.json"
+  write_config "${work}/input.json"
   validate_config "${work}/input.json"
   prepare_cn_acl "${work}/input.json" "${work}/prepared"
   printf '%s\n' "$node_name" > "${work}/node-name"
@@ -522,8 +505,11 @@ backup_changes() {
       cp -a "${change_paths[i]}" "${work}/backup/${i}"
     fi
   done
-  if systemctl is-active --quiet "${APP}.service"; then was_active=1; fi
-  if systemctl is-enabled --quiet "${APP}.service"; then was_enabled=1; fi
+  # 全新安装或清理旧安装后，服务文件尚未写入，无需查询旧状态。
+  if [[ -f "$SERVICE_FILE" ]]; then
+    if systemctl is-active --quiet "${APP}.service" 2>/dev/null; then was_active=1; fi
+    if systemctl is-enabled --quiet "${APP}.service" 2>/dev/null; then was_enabled=1; fi
+  fi
 }
 
 finish_changes() {
