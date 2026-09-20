@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.4.2 | Date: 2026-09-20
+# Version: 1.4.4 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.4.2"
+readonly SCRIPT_VERSION="1.4.4"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -282,15 +282,15 @@ SS2022_NODE_PY
   if [[ "$uri_host" == *:* && "$uri_host" != \[*\] ]]; then
     uri_host="[${uri_host}]"
   fi
-  case "$method_value" in
-    2022-*) userinfo="$(encode_node_name "$method_value"):$(encode_node_name "$password_value")" ;;
-    *) userinfo="$(printf '%s' "${method_value}:${password_value}" | base64 | tr '+/' '-_' | tr -d '=\n')" ;;
-  esac
+  # 与 jinqians/ss-2022.sh 的 b64_url / View 使用相同的分享编码：
+  # Base64URL(method:原始密码)，去掉换行和 padding。
+  # 这是客户端兼容格式，不是 SIP002 为 AEAD-2022 指定的百分号编码格式。
+  userinfo="$(printf '%s' "${method_value}:${password_value}" | base64 | tr '+/' '-_' | tr -d '=\r\n')"
   node_name="$(get_node_name)"
   uri="ss://${userinfo}@${uri_host}:${port_value}#$(encode_node_name "$node_name")"
   printf '\n===== SS2022 节点配置 =====\n'
   printf '节点名称：%s\n' "$node_name"
-  printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host_value" "$port_value" "$method_value" "$password_value" "$uri"
+  printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点导入链接（复制下一整行到“输入 SS URI”）：\n%s\n' "$host_value" "$port_value" "$method_value" "$password_value" "$uri"
   # Quantumult X 原生配置使用原始 Base64 密钥，不使用 URI 的百分号编码。
   # 逗号是字段分隔符；节点名称中的逗号和换行不能原样写入配置行。
   qx_name="${node_name//,/，}"
@@ -299,7 +299,7 @@ SS2022_NODE_PY
   printf '\nQuantumult X 配置（复制下一整行到配置文件的 [server_local] 下）：\n'
   printf 'shadowsocks=%s:%s, method=%s, password=%s, fast-open=true, udp-relay=true, tag=%s\n' "$uri_host" "$port_value" "$method_value" "$password_value" "${qx_name:-SS2022}"
   if command -v qrencode >/dev/null 2>&1; then
-    printf '\n标准 ss:// 链接二维码：\n'
+    printf '\n节点导入二维码（与上方链接相同）：\n'
     qrencode -t ANSIUTF8 "$uri"
   else
     log '未安装 qrencode，暂时无法输出二维码'
