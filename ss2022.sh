@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.4.1 | Date: 2026-09-20
+# Version: 1.4.2 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.4.1"
+readonly SCRIPT_VERSION="1.4.2"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -163,7 +163,7 @@ write_config() {
   "method": "${method}",
   "password": "${password}",
   "mode": "tcp_and_udp",
-  "fast_open": false
+  "fast_open": true
 }
 EOF
   chmod 600 "$output_file"
@@ -297,7 +297,7 @@ SS2022_NODE_PY
   qx_name="${qx_name//$'\r'/ }"
   qx_name="${qx_name//$'\n'/ }"
   printf '\nQuantumult X 配置（复制下一整行到配置文件的 [server_local] 下）：\n'
-  printf 'shadowsocks=%s:%s, method=%s, password=%s, fast-open=false, udp-relay=true, tag=%s\n' "$uri_host" "$port_value" "$method_value" "$password_value" "${qx_name:-SS2022}"
+  printf 'shadowsocks=%s:%s, method=%s, password=%s, fast-open=true, udp-relay=true, tag=%s\n' "$uri_host" "$port_value" "$method_value" "$password_value" "${qx_name:-SS2022}"
   if command -v qrencode >/dev/null 2>&1; then
     printf '\n标准 ss:// 链接二维码：\n'
     qrencode -t ANSIUTF8 "$uri"
