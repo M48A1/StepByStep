@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.2.1 | Date: 2026-09-11
+# Version: 1.3.0 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.2.1"
+readonly SCRIPT_VERSION="1.3.0"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -19,11 +19,79 @@ log() { printf '[%s] %s\n' "$APP" "$*"; }
 die() { printf '[%s] ERROR: %s\n' "$APP" "$*" >&2; exit 1; }
 trap 'die "安装失败，出错行：${LINENO}"' ERR
 
+# ssserver 的 black_list 按客户端来源地址过滤 TCP/UDP。
+# 地址库：https://github.com/gaoyifan/china-operator-ip
+# 不修改系统防火墙；经境外中转的连接只能识别到中转 IP。
+update_cn_acl() (
+  set -Eeuo pipefail
+  [[ -s "$CONF_FILE" ]] || die '请先安装 SS2022'
+  command -v python3 >/dev/null || die '请先安装 python3，或重新运行安装器'
+  local acl_dir work base
+  acl_dir="$(dirname "$CONF_FILE")"
+  work="$(mktemp -d "${acl_dir}/.cn-update.XXXXXX")"
+  trap 'rm -rf "$work"' EXIT
+  base='https://raw.githubusercontent.com/gaoyifan/china-operator-ip/ip-lists'
+  log '下载中国大陆 IPv4 / IPv6 网段，失败时保留原有规则'
+  curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --retry 3 "${base}/china.txt" -o "${work}/cn4"
+  curl -fsSL --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 --retry 3 "${base}/china6.txt" -o "${work}/cn6"
+  python3 - "$CONF_FILE" "$work" <<'SS2022_CN_PY'
+import ipaddress
+import json
+import os
+import pathlib
+import sys
+
+conf = pathlib.Path(sys.argv[1])
+work = pathlib.Path(sys.argv[2])
+acl = conf.parent / 'cn-block.acl'
+config = json.loads(conf.read_text())
+# 避免悄悄覆盖用户自己设置的其他 ACL。
+for item in [config] + config.get('servers', []):
+    if item.get('acl') and item['acl'] != str(acl):
+        sys.exit('检测到自定义 ACL，请先手动合并规则：' + item['acl'])
+networks = []
+for version in (4, 6):
+    entries = set()
+    for line in (work / ('cn' + str(version))).read_text().splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        net = ipaddress.ip_network(line, strict=True)
+        if net.version != version or net.prefixlen == 0:
+            sys.exit('网段类型错误或包含默认路由，拒绝更新')
+        entries.add(net)
+    if len(entries) < 100:
+        sys.exit('网段列表过少，拒绝更新，保留旧规则')
+    networks.extend(sorted(entries, key=lambda n: (int(n.network_address), n.prefixlen)))
+    print('IPv%d：%d 个网段' % (version, len(entries)))
+config['acl'] = str(acl)
+for server in config.get('servers', []):
+    server['acl'] = str(acl)
+(work / 'acl').write_text('[accept_all]\n[black_list]\n' + '\n'.join(map(str, networks)) + '\n')
+(work / 'config').write_text(json.dumps(config, indent=2) + '\n')
+os.chmod(work / 'acl', 0o600)
+os.chmod(work / 'config', 0o600)
+# 同一文件系统原子替换，不让服务读到半份列表。
+os.replace(work / 'acl', acl)
+os.replace(work / 'config', conf)
+SS2022_CN_PY
+  if [[ "${1:-}" != no-restart ]]; then
+    systemctl restart ss2022.service
+    systemctl is-active --quiet ss2022.service || die '规则已写入，但服务启动失败，请检查 ss2022 logs'
+    log '中国大陆来源 IP 屏蔽已生效（IPv4 / IPv6，TCP / UDP）'
+  else
+    log '中国大陆来源 IP 规则已写入，服务启动后生效'
+  fi
+)
+
 install_manager_command() {
-  cat > "$MANAGER" <<'SS2022_MANAGER_EOF'
+  {
+  printf '#!/usr/bin/env bash\n'
+  declare -f update_cn_acl
+  cat <<'SS2022_MANAGER_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-readonly VERSION="1.2.1"
+readonly VERSION="1.3.0"
 readonly CONF_FILE="/etc/shadowsocks-rust/config.json"
 log() { printf '[ss2022] %s\n' "$*"; }
 die() { printf '[ss2022] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -67,13 +135,13 @@ uninstall_server() {
 menu() {
   while true; do
     printf '\n==== Shadowsocks 2022 管理菜单 v%s ====\n' "$VERSION"
-    printf '1) 查看节点配置 / 二维码\n2) 查看服务状态\n3) 重启服务\n4) 查看日志\n5) 查看配置文件（隐藏密码）\n6) 卸载\n0) 退出\n\n'
-    read -r -p '请选择 [0-6]：' choice
+    printf '1) 查看节点配置 / 二维码\n2) 查看服务状态\n3) 重启服务\n4) 查看日志\n5) 查看配置文件（隐藏密码）\n6) 卸载\n7) 启用 / 更新中国大陆来源 IP 屏蔽（重启服务）\n0) 退出\n\n'
+    read -r -p '请选择 [0-7]：' choice
     case "${choice:-0}" in
       1) show_node ;; 2) systemctl status ss2022.service --no-pager || true ;;
       3) systemctl restart ss2022.service && log '服务已重启' ;;
       4) journalctl -u ss2022.service -n 80 --no-pager ;;
-      5) show_config ;; 6) uninstall_server ;; 0) exit 0 ;; *) log '无效选项' ;;
+      5) show_config ;; 6) uninstall_server ;; 7) update_cn_acl ;; 0) exit 0 ;; *) log '无效选项' ;;
     esac
   done
 }
@@ -87,10 +155,12 @@ case "${1:-}" in
   status) systemctl status ss2022.service --no-pager ;;
   restart) systemctl restart ss2022.service && log '服务已重启' ;;
   logs) journalctl -u ss2022.service -n 80 --no-pager ;;
+  block-cn|update-cn) update_cn_acl ;;
   uninstall) uninstall_server ;; version|-v|--version) printf 'ss2022 %s\n' "$VERSION" ;;
-  *) printf '用法：ss2022 [menu|show|config|status|restart|logs|uninstall|version]\n'; exit 1 ;;
+  *) printf '用法：ss2022 [menu|show|config|status|restart|logs|block-cn|update-cn|uninstall|version]\n'; exit 1 ;;
 esac
 SS2022_MANAGER_EOF
+  } > "$MANAGER"
   chmod 0755 "$MANAGER"
   [[ -x "$MANAGER" ]] || die "管理命令安装失败：$MANAGER"
   log "管理命令已安装：ss2022"
@@ -138,8 +208,8 @@ EOF
 menu() {
   while true; do
     printf '\n==== Shadowsocks 2022 管理菜单 v%s ====\n' "$SCRIPT_VERSION"
-    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 检查配置文件 / 删除配置\n7) 卸载\n0) 退出\n\n'
-    read -r -p '请选择 [0-7]：' action
+    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 检查配置文件 / 删除配置\n7) 卸载\n8) 启用 / 更新中国大陆来源 IP 屏蔽（重启服务）\n0) 退出\n\n'
+    read -r -p '请选择 [0-8]：' action
     case "${action:-0}" in
       1) install_server ;;
       2) systemctl status "${APP}.service" --no-pager || true ;;
@@ -148,6 +218,7 @@ menu() {
       5) show_node ;;
       6) inspect_config ;;
       7) uninstall_server; exit 0 ;;
+      8) install_tools; update_cn_acl ;;
       0) exit 0 ;;
       *) printf '无效选项\n' ;;
     esac
@@ -165,9 +236,13 @@ usage() {
   ss2022 config          检查或删除配置
   ss2022 install         安装或重新安装
   ss2022 uninstall       完整卸载
+  ss2022 block-cn        启用中国大陆来源 IP 屏蔽并重启服务
+  ss2022 update-cn       更新 IPv4 / IPv6 网段并重启服务
   ss2022 version         显示脚本版本
 
-也可以使用 bash ss2022.sh 进行首次安装。
+也可以使用 bash ss2022.sh 进行首次安装，默认屏蔽中国大陆来源 IP。
+已有安装可执行 bash ss2022.sh block-cn，无需重装或更换密码。
+网段不自动更新，请定期执行 ss2022 update-cn。
 EOF
 }
 
@@ -267,10 +342,10 @@ install_tools() {
   case "$id" in
     debian|ubuntu|linuxmint)
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl qrencode
+      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl python3 qrencode
       ;;
     rocky|almalinux|centos|rhel|fedora)
-      (command -v dnf >/dev/null && dnf install -y curl ca-certificates openssl) || yum install -y curl ca-certificates openssl
+      (command -v dnf >/dev/null && dnf install -y curl ca-certificates openssl python3) || yum install -y curl ca-certificates openssl python3
       if command -v dnf >/dev/null; then
         dnf install -y qrencode || log 'qrencode 安装失败，将只输出节点链接'
       else
@@ -280,6 +355,7 @@ install_tools() {
     *)
       command -v curl >/dev/null || die "请先安装 curl、ca-certificates 和 openssl"
       command -v openssl >/dev/null || die "请先安装 openssl"
+      command -v python3 >/dev/null || die "请先安装 python3"
       ;;
   esac
 }
@@ -324,6 +400,7 @@ fi
 # 安装器和服务均以 root 运行，配置仅允许 root 读取。
 chown root:root "$CONF_FILE"
 chmod 600 "$CONF_FILE"
+update_cn_acl no-restart
 
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -348,7 +425,8 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now "${APP}.service"
+systemctl enable "${APP}.service"
+systemctl restart "${APP}.service"
 systemctl is-active --quiet "${APP}.service" || { systemctl status "${APP}.service" --no-pager; exit 1; }
 
 ip="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
@@ -377,6 +455,11 @@ dispatch() {
     logs) journalctl -u "${APP}.service" -n 80 --no-pager ;;
     config) inspect_config ;;
     install) install_server ;;
+    block-cn|update-cn)
+      install_tools
+      update_cn_acl
+      install_manager_command
+      ;;
     uninstall) uninstall_server ;;
     version|-v|--version) printf '%s %s\n' "$APP" "$SCRIPT_VERSION" ;;
     help|-h|--help) usage ;;
