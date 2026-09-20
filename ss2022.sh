@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.4.4 | Date: 2026-09-20
+# Version: 1.4.5 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.4.4"
+readonly SCRIPT_VERSION="1.4.5"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -94,6 +94,42 @@ update_cn_acl() (
   log '中国大陆来源 IP 屏蔽已生效（IPv4 / IPv6，TCP / UDP）'
 )
 
+unblock_cn() (
+  set -Eeuo pipefail
+  [[ -s "$CONF_FILE" ]] || die '请先安装 SS2022'
+  command -v python3 >/dev/null || die '请先安装 python3'
+  work='' changed=0 committed=0 was_active=0 was_enabled=0
+  change_paths=()
+  work="$(mktemp -d)"
+  trap 'finish_changes "$?"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  validate_config "$CONF_FILE"
+  python3 - "$CONF_FILE" "${work}/config" "${CONF_DIR}/cn-block.acl" <<'SS2022_UNBLOCK_PY'
+import json
+import os
+import pathlib
+import sys
+
+config = json.loads(pathlib.Path(sys.argv[1]).read_text())
+for item in [config] + config.get('servers', []):
+    if item.get('acl') == sys.argv[3]:
+        del item['acl']
+    elif item.get('acl'):
+        print('保留自定义 ACL：' + item['acl'])
+output = pathlib.Path(sys.argv[2])
+output.write_text(json.dumps(config, indent=2) + '\n')
+os.chmod(output, 0o600)
+SS2022_UNBLOCK_PY
+  backup_changes "$CONF_FILE" "${CONF_DIR}/cn-block.acl"
+  changed=1
+  atomic_install "${work}/config" "$CONF_FILE" 0600
+  rm -f "${CONF_DIR}/cn-block.acl"
+  restart_and_check
+  committed=1
+  log '已解除本脚本的中国大陆来源 IP 屏蔽；节点地址、端口和密码保持不变'
+)
+
 get_node_name() {
   local name_file="${CONF_FILE%/*}/node-name"
   if [[ -s "$name_file" ]]; then
@@ -125,7 +161,7 @@ install_manager_command() (
       printf 'readonly %s=%q\n' "$key" "${!key}"
     done
     # 从内存里的函数生成完整管理命令，支持 bash <(curl ...) 和 curl | bash。
-    declare -f log die prepare_cn_acl update_cn_acl get_node_name encode_node_name install_manager_command prompt choose_node_name write_config menu usage inspect_config preflight_check show_config show_node uninstall_server detect_arch install_tools install_server dispatch validate_config atomic_install backup_changes finish_changes restart_and_check main
+    declare -f log die prepare_cn_acl update_cn_acl unblock_cn get_node_name encode_node_name install_manager_command prompt choose_node_name write_config menu usage inspect_config preflight_check show_config show_node uninstall_server detect_arch install_tools install_server dispatch validate_config atomic_install backup_changes finish_changes restart_and_check main
     printf '\nif [[ "${BASH_SOURCE[0]:-$0}" == "$0" ]]; then main "$@"; fi\n'
   } > "$staged"
   bash -n "$staged"
@@ -172,8 +208,8 @@ EOF
 menu() {
   while true; do
     printf '\n==== Shadowsocks 2022 管理菜单 v%s ====\n' "$SCRIPT_VERSION"
-    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 检查配置文件 / 删除配置\n7) 卸载\n8) 启用 / 更新中国大陆来源 IP 屏蔽（重启服务）\n0) 退出\n\n'
-    prompt '请选择 [0-8]：' action
+    printf '1) 安装 / 重新安装\n2) 查看状态\n3) 重启服务\n4) 查看日志\n5) 显示节点配置 / 二维码\n6) 检查配置文件 / 删除配置\n7) 卸载\n8) 启用 / 更新中国大陆来源 IP 屏蔽（默认关闭，重启服务）\n9) 解除中国大陆来源 IP 屏蔽（重启服务）\n0) 退出\n\n'
+    prompt '请选择 [0-9]：' action
     case "${action:-0}" in
       1) install_server ;;
       2) systemctl status "${APP}.service" --no-pager || true ;;
@@ -183,6 +219,7 @@ menu() {
       6) inspect_config ;;
       7) uninstall_server; exit 0 ;;
       8) install_tools; update_cn_acl ;;
+      9) unblock_cn ;;
       0) exit 0 ;;
       *) printf '无效选项\n' ;;
     esac
@@ -202,13 +239,14 @@ usage() {
   ss2022 uninstall       完整卸载
   ss2022 block-cn        启用中国大陆来源 IP 屏蔽并重启服务
   ss2022 update-cn       更新 IPv4 / IPv6 网段并重启服务
+  ss2022 unblock-cn      解除本脚本的大陆来源 IP 屏蔽并重启服务
   bash ss2022.sh update-manager  仅更新管理命令，不重装或重启服务
   ss2022 version         显示脚本版本
 
 每次执行 bash ss2022.sh 或 ss2022 install，都会自动清理旧安装并重新生成配置。
-安装默认屏蔽中国大陆来源 IP。
-已有安装可执行 bash ss2022.sh block-cn，无需重装或更换密码。
-网段不自动更新，请定期执行 ss2022 update-cn。
+安装默认不屏蔽中国大陆来源 IP。
+旧版安装可执行 bash ss2022.sh unblock-cn 解除屏蔽，无需重装或更换密码。
+仅在需要屏蔽时执行 ss2022 block-cn；启用后网段需手动执行 ss2022 update-cn 更新。
 EOF
 }
 
@@ -382,14 +420,13 @@ install_server() (
   url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${version}/${archive}"
   log "下载 shadowsocks-rust v${version}（${target}）"
   curl --fail --location --retry 3 --connect-timeout 15 --max-time 300 --proto '=https' --tlsv1.2 -o "${work}/${archive}" "$url"
-  mkdir "${work}/unpack" "${work}/prepared"
+  mkdir "${work}/unpack"
   tar -xJf "${work}/${archive}" -C "${work}/unpack"
   found="$(find "${work}/unpack" -type f -name ssserver -perm -u+x -print -quit)"
   [[ -n "$found" ]] || die '压缩包中找不到 ssserver'
   "$found" --version >/dev/null || die '下载的 ssserver 无法在当前系统运行'
   write_config "${work}/input.json"
   validate_config "${work}/input.json"
-  prepare_cn_acl "${work}/input.json" "${work}/prepared"
   printf '%s\n' "$node_name" > "${work}/node-name"
   cat > "${work}/service" <<EOF
 [Unit]
@@ -417,8 +454,7 @@ EOF
   systemctl stop "${APP}.service" 2>/dev/null || true
   mkdir -p "$CONF_DIR"
   chmod 0700 "$CONF_DIR"
-  atomic_install "${work}/prepared/config" "$CONF_FILE" 0600
-  atomic_install "${work}/prepared/acl" "${CONF_DIR}/cn-block.acl" 0600
+  atomic_install "${work}/input.json" "$CONF_FILE" 0600
   atomic_install "${work}/node-name" "${CONF_DIR}/node-name" 0600
   atomic_install "$found" "$BIN" 0755
   atomic_install "${work}/service" "$SERVICE_FILE" 0644
@@ -427,7 +463,7 @@ EOF
   systemctl enable "${APP}.service"
   committed=1
   log "安装完成：脚本 v${SCRIPT_VERSION} / shadowsocks-rust v${version}"
-  log '已启用中国大陆来源 IP 屏蔽（IPv4 / IPv6，TCP / UDP）'
+  log '未启用中国大陆来源 IP 屏蔽，允许大陆客户端连接'
   log '防火墙和云安全组需要放行实际 SS 端口的 TCP / UDP'
   log '以后直接输入 ss2022 打开管理菜单'
   # 节点导出失败不应撤销已经正常运行的服务。
@@ -452,6 +488,10 @@ dispatch() {
     config) inspect_config ;;
     install) install_server ;;
     update-manager) install_manager_command ;;
+    unblock-cn)
+      unblock_cn
+      install_manager_command
+      ;;
     block-cn|update-cn)
       install_tools
       update_cn_acl
