@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.3.0 | Date: 2026-09-20
+# Version: 1.3.1 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.3.0"
+readonly SCRIPT_VERSION="1.3.1"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -91,7 +91,7 @@ install_manager_command() {
   cat <<'SS2022_MANAGER_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-readonly VERSION="1.3.0"
+readonly VERSION="1.3.1"
 readonly CONF_FILE="/etc/shadowsocks-rust/config.json"
 log() { printf '[ss2022] %s\n' "$*"; }
 die() { printf '[ss2022] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -342,10 +342,10 @@ install_tools() {
   case "$id" in
     debian|ubuntu|linuxmint)
       apt-get update
-      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl python3 qrencode
+      DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates openssl python3 qrencode tar xz-utils
       ;;
     rocky|almalinux|centos|rhel|fedora)
-      (command -v dnf >/dev/null && dnf install -y curl ca-certificates openssl python3) || yum install -y curl ca-certificates openssl python3
+      (command -v dnf >/dev/null && dnf install -y curl ca-certificates openssl python3 tar xz) || yum install -y curl ca-certificates openssl python3 tar xz
       if command -v dnf >/dev/null; then
         dnf install -y qrencode || log 'qrencode 安装失败，将只输出节点链接'
       else
@@ -358,6 +358,8 @@ install_tools() {
       command -v python3 >/dev/null || die "请先安装 python3"
       ;;
   esac
+  command -v tar >/dev/null || die '缺少 tar，请安装后重试'
+  command -v xz >/dev/null || die '缺少 xz：Debian/Ubuntu 请安装 xz-utils，RHEL/Fedora 请安装 xz'
 }
 
 version="${SS_VERSION:-1.25.0}"
