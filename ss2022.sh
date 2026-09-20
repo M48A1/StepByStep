@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Version: 1.3.1 | Date: 2026-09-20
+# Version: 1.3.3 | Date: 2026-09-20
 set -Eeuo pipefail
 
 # One-click Shadowsocks 2022 installer for Linux.
 # Project: https://github.com/shadowsocks/shadowsocks-rust
 
 readonly APP="ss2022"
-readonly SCRIPT_VERSION="1.3.1"
+readonly SCRIPT_VERSION="1.3.3"
 readonly CONF_DIR="/etc/shadowsocks-rust"
 readonly CONF_FILE="${CONF_DIR}/config.json"
 readonly SERVICE_FILE="/etc/systemd/system/${APP}.service"
@@ -84,38 +84,40 @@ SS2022_CN_PY
   fi
 )
 
+get_node_name() {
+  local name_file="${CONF_FILE%/*}/node-name"
+  if [[ -s "$name_file" ]]; then
+    cat "$name_file"
+  else
+    printf '%s' 'SS2022'
+  fi
+}
+
+encode_node_name() {
+  # 按 UTF-8 字节编码，兼容中文、空格、#、& 等名称字符。
+  local LC_ALL=C value="$1" char i byte
+  for ((i=0; i<${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      [a-zA-Z0-9.~_-]) printf '%s' "$char" ;;
+      *) printf -v byte '%d' "'$char"; printf '%%%02X' "$((byte & 255))" ;;
+    esac
+  done
+}
+
 install_manager_command() {
   {
   printf '#!/usr/bin/env bash\n'
   declare -f update_cn_acl
+  declare -f get_node_name encode_node_name show_node
   cat <<'SS2022_MANAGER_EOF'
 #!/usr/bin/env bash
 set -Eeuo pipefail
-readonly VERSION="1.3.1"
+readonly VERSION="1.3.3"
 readonly CONF_FILE="/etc/shadowsocks-rust/config.json"
 log() { printf '[ss2022] %s\n' "$*"; }
 die() { printf '[ss2022] ERROR: %s\n' "$*" >&2; exit 1; }
 
-show_node() {
-  [[ -s "$CONF_FILE" ]] || die "配置文件不存在：$CONF_FILE"
-  local port method password host encoded uri
-  port="$(sed -n 's/.*"server_port":[[:space:]]*\([0-9]*\).*/\1/p' "$CONF_FILE" | head -1)"
-  method="$(sed -n 's/.*"method":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
-  password="$(sed -n 's/.*"password":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
-  [[ -n "$port" && -n "$method" && -n "$password" ]] || die '无法解析配置文件'
-  host="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-  [[ -n "$host" ]] || host='请替换为服务器IP或域名'
-  encoded="$(printf '%s' "${method}:${password}" | base64 | tr '+/' '-_' | tr -d '=\n')"
-  uri="ss://${encoded}@${host}:${port}"
-  printf '\n===== SS2022 节点信息 =====\n'
-  printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host" "$port" "$method" "$password" "$uri"
-  if command -v qrencode >/dev/null 2>&1; then
-    printf '\n二维码：\n'
-    qrencode -t ANSIUTF8 "$uri"
-  else
-    log '未安装 qrencode，暂时无法输出二维码'
-  fi
-}
 
 show_config() {
   [[ -f "$CONF_FILE" ]] || die "配置文件不存在：$CONF_FILE"
@@ -177,6 +179,13 @@ choose_bind() {
   esac
 }
 
+choose_node_name() {
+  local default_name
+  default_name="$(get_node_name)"
+  IFS= read -r -p "请输入节点名称 [默认 ${default_name}]：" node_name
+  node_name="${node_name:-$default_name}"
+}
+
 write_config() {
   local bind_value="$1" password
   password="${SS_PASSWORD:-$(openssl rand -base64 32 | tr -d '\n')}"
@@ -184,6 +193,7 @@ write_config() {
   if [[ "$bind_value" == dual ]]; then
     cat > "$CONF_FILE" <<EOF
 {
+  "ipv6_only": true,
   "servers": [
     {"server": "0.0.0.0", "server_port": ${port}, "method": "${method}", "password": "${password}", "mode": "tcp_and_udp"},
     {"server": "::", "server_port": ${port}, "method": "${method}", "password": "${password}", "mode": "tcp_and_udp"}
@@ -198,7 +208,8 @@ EOF
   "method": "${method}",
   "password": "${password}",
   "mode": "tcp_and_udp",
-  "fast_open": false
+  "fast_open": false,
+  "ipv6_only": true
 }
 EOF
   fi
@@ -238,6 +249,7 @@ usage() {
   ss2022 uninstall       完整卸载
   ss2022 block-cn        启用中国大陆来源 IP 屏蔽并重启服务
   ss2022 update-cn       更新 IPv4 / IPv6 网段并重启服务
+  bash ss2022.sh update-manager  仅更新管理命令，不重装或重启服务
   ss2022 version         显示脚本版本
 
 也可以使用 bash ss2022.sh 进行首次安装，默认屏蔽中国大陆来源 IP。
@@ -288,24 +300,55 @@ preflight_check() {
 }
 
 show_node() {
-  [[ -s "$CONF_FILE" ]] || { log '尚未安装或配置文件不存在'; return 0; }
-  local port_value method_value password_value host_value encoded uri
-  port_value="$(sed -n 's/.*"server_port":[[:space:]]*\([0-9]*\).*/\1/p' "$CONF_FILE" | head -1)"
-  method_value="$(sed -n 's/.*"method":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
-  password_value="$(sed -n 's/.*"password":[[:space:]]*"\([^"]*\)".*/\1/p' "$CONF_FILE" | head -1)"
-  host_value="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-  [[ -n "$host_value" ]] || host_value='请替换为服务器 IP 或域名'
-  encoded="$(printf '%s' "${method_value}:${password_value}" | base64 | tr '+/' '-_' | tr -d '=\n')"
-  uri="ss://${encoded}@${host_value}:${port_value}"
+  [[ -s "$CONF_FILE" ]] || die '尚未安装或配置文件不存在'
+  command -v python3 >/dev/null || die '读取节点配置需要 python3'
+  local fields bind_value port_value method_value password_value host_value uri_host userinfo uri node_name
+  # JSON 解析兼容单行、缩进、单栈和双栈配置，不用 sed 猜字段。
+  fields="$(python3 - "$CONF_FILE" <<'SS2022_NODE_PY'
+import json
+import sys
+config = json.load(open(sys.argv[1]))
+server = config['servers'][0] if config.get('servers') else config
+for key in ('server', 'server_port', 'method', 'password'):
+    value = str(server[key])
+    if not value or '\n' in value or '\r' in value:
+        sys.exit('配置字段为空或包含换行：' + key)
+    print(value)
+SS2022_NODE_PY
+)" || die '无法解析节点配置'
+  {
+    IFS= read -r bind_value
+    IFS= read -r port_value
+    IFS= read -r method_value
+    IFS= read -r password_value
+  } <<< "$fields"
+  host_value="${SS_HOST:-}"
+  if [[ -z "$host_value" ]]; then
+    case "$bind_value" in
+      0.0.0.0) host_value="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)" ;;
+      ::) host_value="$(curl -6fsS --max-time 5 https://api6.ipify.org 2>/dev/null || true)" ;;
+      *) host_value="$bind_value" ;;
+    esac
+  fi
+  [[ -n "$host_value" ]] || die '无法获取公网地址，请指定：sudo env SS_HOST=服务器IP或域名 bash ss2022.sh show'
+  uri_host="$host_value"
+  if [[ "$uri_host" == *:* && "$uri_host" != \[*\] ]]; then
+    uri_host="[${uri_host}]"
+  fi
+  case "$method_value" in
+    2022-*) userinfo="$(encode_node_name "$method_value"):$(encode_node_name "$password_value")" ;;
+    *) userinfo="$(printf '%s' "${method_value}:${password_value}" | base64 | tr '+/' '-_' | tr -d '=\n')" ;;
+  esac
+  node_name="$(get_node_name)"
+  uri="ss://${userinfo}@${uri_host}:${port_value}#$(encode_node_name "$node_name")"
   printf '\n===== SS2022 节点配置 =====\n'
+  printf '节点名称：%s\n' "$node_name"
   printf '服务器：%s\n端口：%s\n加密：%s\n密码：%s\n\n节点链接：\n%s\n' "$host_value" "$port_value" "$method_value" "$password_value" "$uri"
-  printf '\n原始配置文件：\n'
-  sed 's/"password"[[:space:]]*:[[:space:]]*"[^"]*"/"password": "********"/g' "$CONF_FILE"
   if command -v qrencode >/dev/null 2>&1; then
     printf '\n二维码：\n'
     qrencode -t ANSIUTF8 "$uri"
   else
-    printf '\n未检测到 qrencode，无法显示终端二维码。Debian/Ubuntu 可执行：\n  sudo apt-get install -y qrencode\n'
+    log '未安装 qrencode，暂时无法输出二维码'
   fi
 }
 
@@ -379,6 +422,7 @@ install_manager_command "$installer_source"
 preflight_check || return 0
 install_tools
 choose_bind
+choose_node_name
 target="$(detect_arch)"
 archive="shadowsocks-v${version}.${target}.tar.xz"
 url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/v${version}/${archive}"
@@ -399,6 +443,8 @@ if [[ -s "$CONF_FILE" && "${SS_FORCE:-0}" != 1 ]]; then
 else
   write_config "$bind"
 fi
+printf '%s\n' "$node_name" > "${CONF_DIR}/node-name"
+chmod 600 "${CONF_DIR}/node-name"
 # 安装器和服务均以 root 运行，配置仅允许 root 读取。
 chown root:root "$CONF_FILE"
 chmod 600 "$CONF_FILE"
@@ -431,12 +477,10 @@ systemctl enable "${APP}.service"
 systemctl restart "${APP}.service"
 systemctl is-active --quiet "${APP}.service" || { systemctl status "${APP}.service" --no-pager; exit 1; }
 
-ip="$(curl -4fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-log "安装完成，监听：${port} / ${method}"
-log "配置文件：${CONF_FILE}"
+log "安装完成，配置文件：${CONF_FILE}"
 log "服务管理：systemctl status ${APP}; journalctl -u ${APP} -e"
 log "以后直接输入 ss2022 打开管理菜单"
-printf '\n客户端参数（请妥善保管）：\n  server: %s\n  port: %s\n  method: %s\n  password: %s\n' "${ip:-你的服务器IP}" "$port" "$method" "$(sed -n 's/.*"password": "\([^"]*\)".*/\1/p' "$CONF_FILE")"
+
 show_node
 }
 
@@ -457,6 +501,7 @@ dispatch() {
     logs) journalctl -u "${APP}.service" -n 80 --no-pager ;;
     config) inspect_config ;;
     install) install_server ;;
+    update-manager) install_manager_command ;;
     block-cn|update-cn)
       install_tools
       update_cn_acl
