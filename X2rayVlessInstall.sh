@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.11"
-BUILD_DATE="2026-07-04"
+VERSION="2.4.14"
+BUILD_DATE="2026-09-22"
 
 set -Eeuo pipefail
 
@@ -53,7 +53,7 @@ check_os() {
 install_dependencies() {
     info "安装依赖..."
     apt-get update -qq
-    apt-get install -y curl jq openssl iproute2 ca-certificates qrencode
+    apt-get install -y curl jq openssl iproute2 ca-certificates qrencode dnsutils
 }
 
 remove_old_config() {
@@ -118,19 +118,21 @@ ask_settings() {
     echo "  4. www.lovelive-anime.jp"
     echo "  5. 自定义"
     while true; do
-        read -r -p "请选择 1-4: " choice
+        read -r -p "请选择 1-5: " choice
         case "$choice" in
-            1) SNI="www.dell.com"; break ;;
-            2) SNI="shopee.sg"; break ;;
-            3) SNI="aws.amazon.com"; break ;;
-            4) SNI="www.lovelive-anime.jp"; break ;;
+            1) SNI="www.dell.com" ;;
+            2) SNI="shopee.sg" ;;
+            3) SNI="aws.amazon.com" ;;
+            4) SNI="www.lovelive-anime.jp" ;;
             5)
                 read -r -p "请输入 SNI 域名: " SNI
-                [[ "$SNI" =~ ^[A-Za-z0-9._-]+$ ]] || die "SNI 格式不正确。"
-                break
+                validate_sni "$SNI" || { warn "SNI 格式不正确，请重新选择。"; continue; }
                 ;;
-            *) warn "请输入 1-4。" ;;
+            *) warn "请输入 1-5。"; continue ;;
         esac
+        if confirm_sni_cdn "$SNI"; then
+            break
+        fi
     done
 
     ok "节点名称: $NODE_NAME"
@@ -248,6 +250,12 @@ write_config() {
                 }
             ]
         }' >"$XRAY_CONFIG"
+
+    local gate_config gate_port
+    gate_port=$(choose_guard_port)
+    gate_config=$(mktemp "${XRAY_CONFIG}.guard.XXXXXX")
+    guard_config "$XRAY_CONFIG" "$gate_config" "$gate_port" || die "生成黑洞防护失败。"
+    mv "$gate_config" "$XRAY_CONFIG"
 
     local user
     user=$(xray_user)
@@ -409,9 +417,177 @@ require_root() {
     [ "${EUID}" -eq 0 ] || die "请使用 root 权限运行。"
 }
 
+# These checks describe the current server's IPv4 DNS view, matching UseIPv4.
+# CNAME references: AWS CloudFront CNAMEs, Akamai edge hostnames, Fastly routing docs.
+cdn_provider_for_name() {
+    local name
+    name=$(printf '%s' "${1%.}" | tr '[:upper:]' '[:lower:]')
+    case "$name" in
+        *.cloudfront.net) printf 'Amazon CloudFront\n' ;;
+        *.edgekey.net|*.edgesuite.net|*.akamaiedge.net|*.akamaized.net) printf 'Akamai\n' ;;
+        *.fastly.net) printf 'Fastly\n' ;;
+    esac
+}
+
+# Print matching IP/CIDR pairs. Reject a malformed list instead of treating it
+# as an empty (successful) lookup; awk uses exact integers for 32-bit IPv4.
+cdn_match_ipv4_ranges() {
+    local addresses=${1//$'\n'/ }
+    awk -v addresses="$addresses" '
+        function ipnum(ip, octets, n, i, result) {
+            n = split(ip, octets, ".")
+            if (n != 4) return -1
+            result = 0
+            for (i = 1; i <= 4; i++) {
+                if (octets[i] !~ /^[0-9]+$/ || octets[i] + 0 > 255) return -1
+                result = result * 256 + octets[i]
+            }
+            return result
+        }
+        NF {
+            if (NF != 1 || split($1, parts, "/") != 2 ||
+                ipnum(parts[1]) < 0 || parts[2] !~ /^[0-9]+$/ || parts[2] + 0 > 32) {
+                invalid = 1; next
+            }
+            cidrs[++count] = $1
+            sizes[count] = 2 ^ (32 - parts[2])
+            networks[count] = int(ipnum(parts[1]) / sizes[count])
+        }
+        END {
+            if (invalid || !count) exit 2
+            total = split(addresses, ips, /[[:space:]]+/)
+            for (i = 1; i <= total; i++) {
+                value = ipnum(ips[i])
+                if (value < 0) continue
+                for (j = 1; j <= count; j++) {
+                    if (int(value / sizes[j]) == networks[j]) {
+                        print ips[i] " ∈ " cidrs[j]
+                        break
+                    }
+                }
+            }
+        }
+    '
+}
+
+check_sni_cdn() {
+    local domain answer aliases addresses alias provider matches ranges headers first_ip
+    local detected=0 suspected=0 incomplete=0
+    CDN_STATUS=unknown
+    domain=$(printf '%s' "${1%.}" | tr '[:upper:]' '[:lower:]')
+    printf '\n正在检测 SNI 是否使用 CDN：%s（当前服务器 IPv4 视角）\n' "$domain"
+    if ! validate_sni "$domain"; then
+        warn "[检测失败] SNI 域名格式不正确。"
+        return 0
+    fi
+    if ! command -v dig >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+        warn "[检测失败] 缺少 dig 或 curl；Debian/Ubuntu 可安装 dnsutils curl。"
+        return 0
+    fi
+    if ! answer=$(dig +time=2 +tries=1 +noall +answer +comments "$domain" A 2>/dev/null || exit $?) ||
+       [[ "$answer" != *"status: NOERROR,"* ]]; then
+        warn "[检测失败] DNS 查询失败或域名不存在，无法判断是否使用 CDN。"
+        return 0
+    fi
+    aliases=$(printf '%s\n' "$answer" | awk '$4 == "CNAME" {print $5}')
+    addresses=$(printf '%s\n' "$answer" | awk '$4 == "A" {print $5}' | sort -u)
+    # Include the input name in case the user directly selects a CDN hostname.
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        provider=$(cdn_provider_for_name "$alias")
+        if [ -n "$provider" ]; then
+            detected=1
+            printf '  CDN 域名特征：%s → %s\n' "$alias" "$provider"
+        fi
+    done <<<"$(printf '%s\n%s' "$domain" "$aliases")"
+    if [ -z "$addresses" ]; then
+        incomplete=1
+        warn "  未解析到 IPv4 地址；当前脚本的 UseIPv4 配置可能无法连接此目标。"
+    else
+        printf '  IPv4 地址：%s\n' "$(printf '%s' "$addresses" | tr '\n' ' ')"
+        # RFC 2544 benchmarking addresses are also commonly used by Fake-IP DNS.
+        if printf "%s\n" "$addresses" | grep -Eq "^198\.(18|19)\."; then
+            incomplete=1
+            warn "  解析到测试网段（可能为 Fake-IP），无法据此判断真实 IP 的 CDN 归属。"
+        fi
+        # Official proxy ranges only. DNS hosting/ASN alone is not evidence of CDN.
+        # Cache successful downloads in this process; never execute downloaded data.
+        ranges=${CDN_CF_RANGES:-}
+        if [ -z "$ranges" ]; then
+            if ! ranges=$(curl -q --noproxy '*' --proto '=https' -fsS \
+                --connect-timeout 3 --max-time 6 --max-filesize 65536 \
+                https://www.cloudflare.com/ips-v4 2>/dev/null || exit $?); then
+                ranges=''
+            fi
+        fi
+        if matches=$(printf '%s\n' "$ranges" | cdn_match_ipv4_ranges "$addresses" || exit $?); then
+            CDN_CF_RANGES=$ranges
+            if [ -n "$matches" ]; then
+                detected=1
+                printf '  Cloudflare 官方代理网段命中：\n%s\n' "$matches"
+            fi
+        else
+            incomplete=1
+            warn "  Cloudflare 官方 IP 网段获取或校验失败，IP 检测未完成。"
+        fi
+        if [ "$detected" -eq 0 ]; then
+            first_ip=${addresses%%$'\n'*}
+            # Do not follow redirects: headers must belong to this SNI, not a
+            # different site's redirect destination. Bypass proxy environment vars.
+            if headers=$(curl -q --noproxy '*' --proto '=https' -4 -sS -I \
+                --connect-timeout 3 --max-time 6 --max-filesize 65536 \
+                --resolve "${domain}:443:${first_ip}" "https://${domain}/" 2>/dev/null || exit $?); then
+                headers=$(printf '%s\n' "$headers" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+                if printf '%s\n' "$headers" | grep -Eq '^(cf-ray:|cf-cache-status:|server:[[:space:]]*cloudflare([[:space:]]|$))'; then
+                    suspected=1
+                    printf '  HTTPS 响应头：发现 Cloudflare 特征（辅助证据）。\n'
+                fi
+                if printf '%s\n' "$headers" | grep -Eq '^x-amz-cf-(id|pop):'; then
+                    suspected=1
+                    printf '  HTTPS 响应头：发现 CloudFront 特征（辅助证据）。\n'
+                fi
+            else
+                incomplete=1
+                warn "  HTTPS 响应头检测失败（连接、证书或超时），不能据此认定没有 CDN。"
+            fi
+        fi
+    fi
+    if [ "$detected" -eq 1 ]; then
+        CDN_STATUS=detected
+        warn "[检测到 CDN] 建议考虑其他目标；允许的 SNI 仍可能产生转发流量。"
+    elif [ "$suspected" -eq 1 ]; then
+        CDN_STATUS=suspected
+        warn "[疑似 CDN] 响应头仅为辅助证据，可能被修改或伪造。"
+    elif [ "$incomplete" -eq 1 ]; then
+        warn "[检测未完成] 无法确认是否使用 CDN。"
+    else
+        CDN_STATUS=not_detected
+        ok "[未发现 CDN 特征] 检测范围有限，不代表确定没有 CDN。"
+    fi
+    return 0
+}
+
+confirm_sni_cdn() {
+    local answer
+    check_sni_cdn "$1"
+    if [ -t 0 ] && { [ "$CDN_STATUS" = detected ] || [ "$CDN_STATUS" = suspected ]; }; then
+        read -r -p "继续使用此 SNI？[Y/n]: " answer || return 1
+        case "$answer" in n|N|no|NO) return 1 ;; esac
+    fi
+    return 0
+}
+
 validate_sni() {
-    local value=$1
-    [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+    local value=${1%.} label
+    local -a labels
+    [ -n "$value" ] && [ "${#value}" -le 253 ] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$value" != .* && "$value" != *. && "$value" != *..* ]] || return 1
+    IFS=. read -r -a labels <<<"$value"
+    for label in "${labels[@]}"; do
+        [ "${#label}" -le 63 ] || return 1
+        [[ "$label" != -* && "$label" != *- ]] || return 1
+    done
 }
 
 validate_port() {
@@ -458,27 +634,27 @@ repair_reality_config() {
     require_root
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
-    local old_target old_sni tmp_config
+    local old_target tmp_config
     old_target=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target][0] // empty' "$XRAY_CONFIG")
     if [ -z "$old_target" ]; then
         test_xray_config "$XRAY_CONFIG" || die "当前配置校验失败。"
         regenerate_client_info_from_config
-        ok "未发现旧字段 target，已重新生成客户端信息和二维码。"
+        ok "未发现需要转换的 target 字段，已重新生成客户端信息和二维码。"
         return
     fi
-    old_sni=${old_target%:*}
 
     tmp_config=$(mktemp --suffix=.json)
-    jq --arg oldTarget "$old_target" --arg oldSni "$old_sni" '
+    jq --arg oldTarget "$old_target" '
         (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.dest) = $oldTarget
         | del(.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target)
-        | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$oldSni]
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "修复后的配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -491,7 +667,7 @@ regenerate_client_info_from_config() {
 
     local uuid port flow email node_name sni short_id private_key public_key server_ip encoded_name link
     uuid=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].id][0] // empty' "$XRAY_CONFIG")
-    port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    port=$(jq -r '([.inbounds[] | select(.tag == "reality-sni-gate") | .port][0] // [.inbounds[] | select(.protocol == "vless") | .port][0]) // empty' "$XRAY_CONFIG")
     flow=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].flow][0] // empty' "$XRAY_CONFIG")
     email=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].email][0] // empty' "$XRAY_CONFIG")
     sni=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$XRAY_CONFIG")
@@ -592,6 +768,7 @@ change_sni() {
         read -r -p "请输入新的 SNI 域名: " new_sni
     fi
     validate_sni "$new_sni" || die "SNI 格式不正确。"
+    confirm_sni_cdn "$new_sni" || { warn "已取消修改 SNI，原配置未修改。"; return 0; }
 
     tmp_config=$(mktemp --suffix=.json)
     jq --arg sni "$new_sni" '
@@ -600,10 +777,12 @@ change_sni() {
         | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "新 SNI 配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -622,7 +801,7 @@ change_port() {
     fi
     validate_port "$new_port" || die "端口必须是 1-65535 之间的数字。"
 
-    old_port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    old_port=$(jq -r '([.inbounds[] | select(.tag == "reality-sni-gate") | .port][0] // [.inbounds[] | select(.protocol == "vless") | .port][0]) // empty' "$XRAY_CONFIG")
     if [ "$new_port" = "$old_port" ]; then
         warn "新端口与当前端口相同，无需修改。"
         return
@@ -630,13 +809,17 @@ change_port() {
 
     tmp_config=$(mktemp --suffix=.json)
     jq --argjson port "$new_port" '
-        (.inbounds[] | select(.protocol == "vless") | .port) = $port
+        if any(.inbounds[]; .tag == "reality-sni-gate") then
+            (.inbounds[] | select(.tag == "reality-sni-gate") | .port) = $port
+        else (.inbounds[] | select(.protocol == "vless") | .port) = $port end
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "新端口配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -671,15 +854,117 @@ change_dns() {
         }
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "新 DNS 配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     ok "DNS 已更新为：$dns1, $dns2"
     ok "Xray 已重启。"
 }
+
+# Filter the REALITY target connection; VLESS itself keeps the public listener.
+guard_config() {
+    local input=$1 output=$2 internal_port=${3:-45987}
+    jq --argjson internal "$internal_port" '
+        [.inbounds[] | select(.protocol == "vless")] as $v
+        | if ($v | length) != 1 or $v[0].streamSettings.security != "reality"
+          then error("仅支持单个 VLESS REALITY 入站") else . end
+        | $v[0] as $v
+        | ([.inbounds[] | select(.tag == "reality-sni-gate")][0] // null) as $old
+        | ([.inbounds[] | select(.tag == "reality-target-gate")][0] // null) as $gate
+        | ($v.streamSettings.realitySettings.serverNames | map(select(length > 0) | "full:" + .)) as $names
+        | if ($names | length) == 0 then error("缺少非空 SNI") else . end
+        | ($old.port // $v.port) as $public
+        | ($gate.port // (if $old != null then $v.port else $internal end)) as $private
+        | if $public == $private or any(.inbounds[];
+            .protocol != "vless" and .tag != "reality-sni-gate" and .tag != "reality-target-gate" and .port == $private)
+          then error("内部端口与其他入站端口冲突") else . end
+        | ($v.streamSettings.realitySettings.target // $v.streamSettings.realitySettings.dest) as $target
+        | (if $gate != null and $target == ("127.0.0.1:" + ($gate.port | tostring))
+           then $gate.settings
+           else ($target | capture("^(?<address>.+):(?<port>[0-9]+)$")
+                 | .port |= tonumber | .address |= ltrimstr("[") | .address |= rtrimstr("]")) end) as $remote
+        | if $remote == null then error("不支持的 REALITY 目标格式") else . end
+        | .inbounds = ([{
+            tag: "reality-target-gate", listen: "127.0.0.1",
+            port: $private, protocol: "dokodemo-door",
+            settings: {address: $remote.address, port: $remote.port, network: "tcp"},
+            sniffing: {enabled: true, destOverride: ["tls"], routeOnly: true}
+          }] + [.inbounds[] | select(.tag != "reality-sni-gate" and .tag != "reality-target-gate")
+            | if .protocol == "vless" then
+                .listen = ($old.listen // $v.listen // "0.0.0.0") | .port = $public
+                | .streamSettings.realitySettings.dest = ("127.0.0.1:" + ($private | tostring))
+                | del(.streamSettings.realitySettings.target)
+              else . end])
+        | .outbounds = ([.outbounds[] | select(.tag != "reality-gate-direct" and .tag != "reality-gate-block")]
+            + [{tag: "reality-gate-direct", protocol: "freedom", settings: {domainStrategy: "UseIPv4"}},
+               {tag: "reality-gate-block", protocol: "blackhole"}])
+        | .routing.rules = ([
+            {type: "field", inboundTag: ["reality-target-gate"], domain: $names, outboundTag: "reality-gate-direct"},
+            {type: "field", inboundTag: ["reality-target-gate"], outboundTag: "reality-gate-block"}
+          ] + [(.routing.rules // [])[] | select(
+            ((.inboundTag // []) | index("reality-sni-gate")) == null and
+            ((.inboundTag // []) | index("reality-target-gate")) == null)])
+    ' "$input" >"$output" || return 1
+    [ -s "$output" ]
+}
+
+choose_guard_port() {
+    local candidate listeners
+    listeners=$(ss -H -ltn) || return 1
+    for candidate in {45987..46087}; do
+        if ! jq -e --argjson p "$candidate" 'any(.inbounds[]; .port == $p)' "$XRAY_CONFIG" >/dev/null &&
+           ! printf '%s\n' "$listeners" | awk '{print $4}' | grep -Eq ":${candidate}$"; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    die "未找到可用的内部端口。"
+}
+
+sync_guard_config() {
+    local path=$1 tmp
+    if jq -e 'any(.inbounds[]; .tag == "reality-sni-gate" or .tag == "reality-target-gate")' "$path" >/dev/null; then
+        tmp=$(mktemp "${path}.guard.XXXXXX")
+        if ! guard_config "$path" "$tmp"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        cat "$tmp" >"$path"
+        rm -f "$tmp"
+    fi
+}
+
+enable_blackhole() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+    local tmp backup internal_port
+    internal_port=$(choose_guard_port)
+    tmp=$(mktemp "${XRAY_CONFIG}.guard.XXXXXX")
+    if ! guard_config "$XRAY_CONFIG" "$tmp" "$internal_port" || ! test_xray_config "$tmp"; then
+        rm -f "$tmp"
+        die "黑洞配置校验失败，原配置未修改。"
+    fi
+    backup=$(mktemp "${XRAY_CONFIG}.backup.XXXXXX")
+    cp -p "$XRAY_CONFIG" "$backup"
+    # Preserve the existing service-readable ownership and mode.
+    chown --reference="$XRAY_CONFIG" "$tmp"
+    chmod --reference="$XRAY_CONFIG" "$tmp"
+    mv "$tmp" "$XRAY_CONFIG"
+    if ! systemctl restart xray || ! systemctl is-active --quiet xray; then
+        mv "$backup" "$XRAY_CONFIG"
+        systemctl restart xray || true
+        die "启动失败，已恢复原配置。"
+    fi
+    rm -f "$backup"
+    ok "SNI 黑洞防护已启用，客户端链接不变。"
+    warn "目标转发仅放行配置中的 SNI；访问允许的目标仍会消耗带宽。"
+}
+
 
 restart_service() {
     require_root
@@ -703,6 +988,7 @@ manager_menu() {
         echo "6. 重启 Xray"
         echo "7. 查看 Xray 状态"
         echo "8. 修复 Reality 配置"
+        echo "9. 启用 SNI 黑洞防护"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -714,8 +1000,9 @@ manager_menu() {
             6) restart_service ;;
             7) status_service ;;
             8) repair_reality_config ;;
+            9) enable_blackhole ;;
             0) exit 0 ;;
-            *) warn "请输入 0-8。" ;;
+            *) warn "请输入 0-9。" ;;
         esac
     done
 }
@@ -732,7 +1019,8 @@ usage() {
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
   vless status         查看状态
-  vless repair         修复旧版 Reality 配置 target 字段
+  vless repair         转换 Reality target 字段为兼容字段 dest
+  vless blackhole      启用 SNI 黑洞防护（保留客户端链接）
 EOF
 }
 
@@ -749,6 +1037,7 @@ dispatch() {
         restart) restart_service ;;
         status) status_service ;;
         repair) repair_reality_config ;;
+        blackhole) enable_blackhole ;;
         help|-h|--help) usage ;;
         *) usage; exit 1 ;;
     esac
@@ -763,9 +1052,177 @@ VLESS_MANAGER_EOF
     echo "以后可直接运行：vless"
 }
 
+# These checks describe the current server's IPv4 DNS view, matching UseIPv4.
+# CNAME references: AWS CloudFront CNAMEs, Akamai edge hostnames, Fastly routing docs.
+cdn_provider_for_name() {
+    local name
+    name=$(printf '%s' "${1%.}" | tr '[:upper:]' '[:lower:]')
+    case "$name" in
+        *.cloudfront.net) printf 'Amazon CloudFront\n' ;;
+        *.edgekey.net|*.edgesuite.net|*.akamaiedge.net|*.akamaized.net) printf 'Akamai\n' ;;
+        *.fastly.net) printf 'Fastly\n' ;;
+    esac
+}
+
+# Print matching IP/CIDR pairs. Reject a malformed list instead of treating it
+# as an empty (successful) lookup; awk uses exact integers for 32-bit IPv4.
+cdn_match_ipv4_ranges() {
+    local addresses=${1//$'\n'/ }
+    awk -v addresses="$addresses" '
+        function ipnum(ip, octets, n, i, result) {
+            n = split(ip, octets, ".")
+            if (n != 4) return -1
+            result = 0
+            for (i = 1; i <= 4; i++) {
+                if (octets[i] !~ /^[0-9]+$/ || octets[i] + 0 > 255) return -1
+                result = result * 256 + octets[i]
+            }
+            return result
+        }
+        NF {
+            if (NF != 1 || split($1, parts, "/") != 2 ||
+                ipnum(parts[1]) < 0 || parts[2] !~ /^[0-9]+$/ || parts[2] + 0 > 32) {
+                invalid = 1; next
+            }
+            cidrs[++count] = $1
+            sizes[count] = 2 ^ (32 - parts[2])
+            networks[count] = int(ipnum(parts[1]) / sizes[count])
+        }
+        END {
+            if (invalid || !count) exit 2
+            total = split(addresses, ips, /[[:space:]]+/)
+            for (i = 1; i <= total; i++) {
+                value = ipnum(ips[i])
+                if (value < 0) continue
+                for (j = 1; j <= count; j++) {
+                    if (int(value / sizes[j]) == networks[j]) {
+                        print ips[i] " ∈ " cidrs[j]
+                        break
+                    }
+                }
+            }
+        }
+    '
+}
+
+check_sni_cdn() {
+    local domain answer aliases addresses alias provider matches ranges headers first_ip
+    local detected=0 suspected=0 incomplete=0
+    CDN_STATUS=unknown
+    domain=$(printf '%s' "${1%.}" | tr '[:upper:]' '[:lower:]')
+    printf '\n正在检测 SNI 是否使用 CDN：%s（当前服务器 IPv4 视角）\n' "$domain"
+    if ! validate_sni "$domain"; then
+        warn "[检测失败] SNI 域名格式不正确。"
+        return 0
+    fi
+    if ! command -v dig >/dev/null 2>&1 || ! command -v curl >/dev/null 2>&1; then
+        warn "[检测失败] 缺少 dig 或 curl；Debian/Ubuntu 可安装 dnsutils curl。"
+        return 0
+    fi
+    if ! answer=$(dig +time=2 +tries=1 +noall +answer +comments "$domain" A 2>/dev/null || exit $?) ||
+       [[ "$answer" != *"status: NOERROR,"* ]]; then
+        warn "[检测失败] DNS 查询失败或域名不存在，无法判断是否使用 CDN。"
+        return 0
+    fi
+    aliases=$(printf '%s\n' "$answer" | awk '$4 == "CNAME" {print $5}')
+    addresses=$(printf '%s\n' "$answer" | awk '$4 == "A" {print $5}' | sort -u)
+    # Include the input name in case the user directly selects a CDN hostname.
+    while IFS= read -r alias; do
+        [ -n "$alias" ] || continue
+        provider=$(cdn_provider_for_name "$alias")
+        if [ -n "$provider" ]; then
+            detected=1
+            printf '  CDN 域名特征：%s → %s\n' "$alias" "$provider"
+        fi
+    done <<<"$(printf '%s\n%s' "$domain" "$aliases")"
+    if [ -z "$addresses" ]; then
+        incomplete=1
+        warn "  未解析到 IPv4 地址；当前脚本的 UseIPv4 配置可能无法连接此目标。"
+    else
+        printf '  IPv4 地址：%s\n' "$(printf '%s' "$addresses" | tr '\n' ' ')"
+        # RFC 2544 benchmarking addresses are also commonly used by Fake-IP DNS.
+        if printf "%s\n" "$addresses" | grep -Eq "^198\.(18|19)\."; then
+            incomplete=1
+            warn "  解析到测试网段（可能为 Fake-IP），无法据此判断真实 IP 的 CDN 归属。"
+        fi
+        # Official proxy ranges only. DNS hosting/ASN alone is not evidence of CDN.
+        # Cache successful downloads in this process; never execute downloaded data.
+        ranges=${CDN_CF_RANGES:-}
+        if [ -z "$ranges" ]; then
+            if ! ranges=$(curl -q --noproxy '*' --proto '=https' -fsS \
+                --connect-timeout 3 --max-time 6 --max-filesize 65536 \
+                https://www.cloudflare.com/ips-v4 2>/dev/null || exit $?); then
+                ranges=''
+            fi
+        fi
+        if matches=$(printf '%s\n' "$ranges" | cdn_match_ipv4_ranges "$addresses" || exit $?); then
+            CDN_CF_RANGES=$ranges
+            if [ -n "$matches" ]; then
+                detected=1
+                printf '  Cloudflare 官方代理网段命中：\n%s\n' "$matches"
+            fi
+        else
+            incomplete=1
+            warn "  Cloudflare 官方 IP 网段获取或校验失败，IP 检测未完成。"
+        fi
+        if [ "$detected" -eq 0 ]; then
+            first_ip=${addresses%%$'\n'*}
+            # Do not follow redirects: headers must belong to this SNI, not a
+            # different site's redirect destination. Bypass proxy environment vars.
+            if headers=$(curl -q --noproxy '*' --proto '=https' -4 -sS -I \
+                --connect-timeout 3 --max-time 6 --max-filesize 65536 \
+                --resolve "${domain}:443:${first_ip}" "https://${domain}/" 2>/dev/null || exit $?); then
+                headers=$(printf '%s\n' "$headers" | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+                if printf '%s\n' "$headers" | grep -Eq '^(cf-ray:|cf-cache-status:|server:[[:space:]]*cloudflare([[:space:]]|$))'; then
+                    suspected=1
+                    printf '  HTTPS 响应头：发现 Cloudflare 特征（辅助证据）。\n'
+                fi
+                if printf '%s\n' "$headers" | grep -Eq '^x-amz-cf-(id|pop):'; then
+                    suspected=1
+                    printf '  HTTPS 响应头：发现 CloudFront 特征（辅助证据）。\n'
+                fi
+            else
+                incomplete=1
+                warn "  HTTPS 响应头检测失败（连接、证书或超时），不能据此认定没有 CDN。"
+            fi
+        fi
+    fi
+    if [ "$detected" -eq 1 ]; then
+        CDN_STATUS=detected
+        warn "[检测到 CDN] 建议考虑其他目标；允许的 SNI 仍可能产生转发流量。"
+    elif [ "$suspected" -eq 1 ]; then
+        CDN_STATUS=suspected
+        warn "[疑似 CDN] 响应头仅为辅助证据，可能被修改或伪造。"
+    elif [ "$incomplete" -eq 1 ]; then
+        warn "[检测未完成] 无法确认是否使用 CDN。"
+    else
+        CDN_STATUS=not_detected
+        ok "[未发现 CDN 特征] 检测范围有限，不代表确定没有 CDN。"
+    fi
+    return 0
+}
+
+confirm_sni_cdn() {
+    local answer
+    check_sni_cdn "$1"
+    if [ -t 0 ] && { [ "$CDN_STATUS" = detected ] || [ "$CDN_STATUS" = suspected ]; }; then
+        read -r -p "继续使用此 SNI？[Y/n]: " answer || return 1
+        case "$answer" in n|N|no|NO) return 1 ;; esac
+    fi
+    return 0
+}
+
 validate_sni() {
-    local value=$1
-    [[ "$value" =~ ^[A-Za-z0-9._-]+$ ]]
+    local value=${1%.} label
+    local -a labels
+    [ -n "$value" ] && [ "${#value}" -le 253 ] || return 1
+    [[ "$value" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+    [[ "$value" != .* && "$value" != *. && "$value" != *..* ]] || return 1
+    IFS=. read -r -a labels <<<"$value"
+    for label in "${labels[@]}"; do
+        [ "${#label}" -le 63 ] || return 1
+        [[ "$label" != -* && "$label" != *- ]] || return 1
+    done
 }
 
 validate_port() {
@@ -793,27 +1250,27 @@ repair_reality_config() {
     require_root
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
-    local old_target old_sni tmp_config
+    local old_target tmp_config
     old_target=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target][0] // empty' "$XRAY_CONFIG")
     if [ -z "$old_target" ]; then
         test_xray_config "$XRAY_CONFIG" || die "当前配置校验失败。"
         regenerate_client_info_from_config
-        ok "未发现旧字段 target，已重新生成客户端信息和二维码。"
+        ok "未发现需要转换的 target 字段，已重新生成客户端信息和二维码。"
         return
     fi
-    old_sni=${old_target%:*}
 
     tmp_config=$(mktemp --suffix=.json)
-    jq --arg oldTarget "$old_target" --arg oldSni "$old_sni" '
+    jq --arg oldTarget "$old_target" '
         (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.dest) = $oldTarget
         | del(.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.target)
-        | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$oldSni]
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "修复后的配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -826,7 +1283,7 @@ regenerate_client_info_from_config() {
 
     local uuid port flow email node_name sni short_id private_key public_key server_ip encoded_name link
     uuid=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].id][0] // empty' "$XRAY_CONFIG")
-    port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    port=$(jq -r '([.inbounds[] | select(.tag == "reality-sni-gate") | .port][0] // [.inbounds[] | select(.protocol == "vless") | .port][0]) // empty' "$XRAY_CONFIG")
     flow=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].flow][0] // empty' "$XRAY_CONFIG")
     email=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .settings.clients[0].email][0] // empty' "$XRAY_CONFIG")
     sni=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames[0]][0] // empty' "$XRAY_CONFIG")
@@ -932,6 +1389,7 @@ change_sni() {
         read -r -p "请输入新的 SNI 域名: " new_sni
     fi
     validate_sni "$new_sni" || die "SNI 格式不正确。"
+    confirm_sni_cdn "$new_sni" || { warn "已取消修改 SNI，原配置未修改。"; return 0; }
 
     tmp_config=$(mktemp --suffix=.json)
     jq --arg sni "$new_sni" '
@@ -940,10 +1398,12 @@ change_sni() {
         | (.inbounds[] | select(.protocol == "vless") | .streamSettings.realitySettings.serverNames) = [$sni]
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "新 SNI 配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -962,7 +1422,7 @@ change_port() {
     fi
     validate_port "$new_port" || die "端口必须是 1-65535 之间的数字。"
 
-    old_port=$(jq -r '[.inbounds[] | select(.protocol == "vless") | .port][0] // empty' "$XRAY_CONFIG")
+    old_port=$(jq -r '([.inbounds[] | select(.tag == "reality-sni-gate") | .port][0] // [.inbounds[] | select(.protocol == "vless") | .port][0]) // empty' "$XRAY_CONFIG")
     if [ "$new_port" = "$old_port" ]; then
         warn "新端口与当前端口相同，无需修改。"
         return
@@ -970,13 +1430,17 @@ change_port() {
 
     tmp_config=$(mktemp --suffix=.json)
     jq --argjson port "$new_port" '
-        (.inbounds[] | select(.protocol == "vless") | .port) = $port
+        if any(.inbounds[]; .tag == "reality-sni-gate") then
+            (.inbounds[] | select(.tag == "reality-sni-gate") | .port) = $port
+        else (.inbounds[] | select(.protocol == "vless") | .port) = $port end
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "新端口配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     regenerate_client_info_from_config
@@ -1017,15 +1481,117 @@ change_dns() {
         }
     ' "$XRAY_CONFIG" >"$tmp_config"
 
-    if ! test_xray_config "$tmp_config"; then
+    if ! sync_guard_config "$tmp_config" || ! test_xray_config "$tmp_config"; then
         rm -f "$tmp_config"
         die "新 DNS 配置校验失败，未覆盖原配置。"
     fi
+    chown --reference="$XRAY_CONFIG" "$tmp_config"
+    chmod --reference="$XRAY_CONFIG" "$tmp_config"
     mv "$tmp_config" "$XRAY_CONFIG"
     systemctl restart xray
     ok "DNS 已更新为：$dns1, $dns2"
     ok "Xray 已重启。"
 }
+
+# Filter the REALITY target connection; VLESS itself keeps the public listener.
+guard_config() {
+    local input=$1 output=$2 internal_port=${3:-45987}
+    jq --argjson internal "$internal_port" '
+        [.inbounds[] | select(.protocol == "vless")] as $v
+        | if ($v | length) != 1 or $v[0].streamSettings.security != "reality"
+          then error("仅支持单个 VLESS REALITY 入站") else . end
+        | $v[0] as $v
+        | ([.inbounds[] | select(.tag == "reality-sni-gate")][0] // null) as $old
+        | ([.inbounds[] | select(.tag == "reality-target-gate")][0] // null) as $gate
+        | ($v.streamSettings.realitySettings.serverNames | map(select(length > 0) | "full:" + .)) as $names
+        | if ($names | length) == 0 then error("缺少非空 SNI") else . end
+        | ($old.port // $v.port) as $public
+        | ($gate.port // (if $old != null then $v.port else $internal end)) as $private
+        | if $public == $private or any(.inbounds[];
+            .protocol != "vless" and .tag != "reality-sni-gate" and .tag != "reality-target-gate" and .port == $private)
+          then error("内部端口与其他入站端口冲突") else . end
+        | ($v.streamSettings.realitySettings.target // $v.streamSettings.realitySettings.dest) as $target
+        | (if $gate != null and $target == ("127.0.0.1:" + ($gate.port | tostring))
+           then $gate.settings
+           else ($target | capture("^(?<address>.+):(?<port>[0-9]+)$")
+                 | .port |= tonumber | .address |= ltrimstr("[") | .address |= rtrimstr("]")) end) as $remote
+        | if $remote == null then error("不支持的 REALITY 目标格式") else . end
+        | .inbounds = ([{
+            tag: "reality-target-gate", listen: "127.0.0.1",
+            port: $private, protocol: "dokodemo-door",
+            settings: {address: $remote.address, port: $remote.port, network: "tcp"},
+            sniffing: {enabled: true, destOverride: ["tls"], routeOnly: true}
+          }] + [.inbounds[] | select(.tag != "reality-sni-gate" and .tag != "reality-target-gate")
+            | if .protocol == "vless" then
+                .listen = ($old.listen // $v.listen // "0.0.0.0") | .port = $public
+                | .streamSettings.realitySettings.dest = ("127.0.0.1:" + ($private | tostring))
+                | del(.streamSettings.realitySettings.target)
+              else . end])
+        | .outbounds = ([.outbounds[] | select(.tag != "reality-gate-direct" and .tag != "reality-gate-block")]
+            + [{tag: "reality-gate-direct", protocol: "freedom", settings: {domainStrategy: "UseIPv4"}},
+               {tag: "reality-gate-block", protocol: "blackhole"}])
+        | .routing.rules = ([
+            {type: "field", inboundTag: ["reality-target-gate"], domain: $names, outboundTag: "reality-gate-direct"},
+            {type: "field", inboundTag: ["reality-target-gate"], outboundTag: "reality-gate-block"}
+          ] + [(.routing.rules // [])[] | select(
+            ((.inboundTag // []) | index("reality-sni-gate")) == null and
+            ((.inboundTag // []) | index("reality-target-gate")) == null)])
+    ' "$input" >"$output" || return 1
+    [ -s "$output" ]
+}
+
+choose_guard_port() {
+    local candidate listeners
+    listeners=$(ss -H -ltn) || return 1
+    for candidate in {45987..46087}; do
+        if ! jq -e --argjson p "$candidate" 'any(.inbounds[]; .port == $p)' "$XRAY_CONFIG" >/dev/null &&
+           ! printf '%s\n' "$listeners" | awk '{print $4}' | grep -Eq ":${candidate}$"; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+    die "未找到可用的内部端口。"
+}
+
+sync_guard_config() {
+    local path=$1 tmp
+    if jq -e 'any(.inbounds[]; .tag == "reality-sni-gate" or .tag == "reality-target-gate")' "$path" >/dev/null; then
+        tmp=$(mktemp "${path}.guard.XXXXXX")
+        if ! guard_config "$path" "$tmp"; then
+            rm -f "$tmp"
+            return 1
+        fi
+        cat "$tmp" >"$path"
+        rm -f "$tmp"
+    fi
+}
+
+enable_blackhole() {
+    require_root
+    [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
+    local tmp backup internal_port
+    internal_port=$(choose_guard_port)
+    tmp=$(mktemp "${XRAY_CONFIG}.guard.XXXXXX")
+    if ! guard_config "$XRAY_CONFIG" "$tmp" "$internal_port" || ! test_xray_config "$tmp"; then
+        rm -f "$tmp"
+        die "黑洞配置校验失败，原配置未修改。"
+    fi
+    backup=$(mktemp "${XRAY_CONFIG}.backup.XXXXXX")
+    cp -p "$XRAY_CONFIG" "$backup"
+    # Preserve the existing service-readable ownership and mode.
+    chown --reference="$XRAY_CONFIG" "$tmp"
+    chmod --reference="$XRAY_CONFIG" "$tmp"
+    mv "$tmp" "$XRAY_CONFIG"
+    if ! systemctl restart xray || ! systemctl is-active --quiet xray; then
+        mv "$backup" "$XRAY_CONFIG"
+        systemctl restart xray || true
+        die "启动失败，已恢复原配置。"
+    fi
+    rm -f "$backup"
+    ok "SNI 黑洞防护已启用，客户端链接不变。"
+    warn "目标转发仅放行配置中的 SNI；访问允许的目标仍会消耗带宽。"
+}
+
 
 restart_service() {
     require_root
@@ -1049,6 +1615,7 @@ manager_menu() {
         echo "6. 重启 Xray"
         echo "7. 查看 Xray 状态"
         echo "8. 修复 Reality 配置"
+        echo "9. 启用 SNI 黑洞防护"
         echo "0. 退出"
         read -r -p "请选择: " choice
         case "$choice" in
@@ -1060,8 +1627,9 @@ manager_menu() {
             6) restart_service ;;
             7) status_service ;;
             8) repair_reality_config ;;
+            9) enable_blackhole ;;
             0) exit 0 ;;
-            *) warn "请输入 0-8。" ;;
+            *) warn "请输入 0-9。" ;;
         esac
     done
 }
@@ -1079,7 +1647,8 @@ usage() {
                          修改 Xray DNS，例如：vless dns 1.1.1.1 8.8.8.8
   vless restart        重启 Xray
   vless status         查看状态
-  vless repair         修复旧版 Reality 配置 target 字段
+  vless repair         转换 Reality target 字段为兼容字段 dest
+  vless blackhole      启用 SNI 黑洞防护（保留客户端链接）
   vless update-manager 更新 vless 管理命令，不重装节点
   vless install        重新安装
 
@@ -1127,6 +1696,7 @@ dispatch() {
         restart) restart_service ;;
         status) status_service ;;
         repair) repair_reality_config ;;
+        blackhole) enable_blackhole ;;
         update-manager|update) require_root; install_manager_command ;;
         help|-h|--help) usage ;;
         *) usage; exit 1 ;;
