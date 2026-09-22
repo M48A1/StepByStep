@@ -5,9 +5,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/M48A1/StepByStep/refs/heads/ma
 ```
 
 
-```bash
-bash <(curl -Ls https://raw.githubusercontent.com/M48A1/StepByStep/refs/heads/main/SingboxVlessInstall.sh)
-```
+
 
 
 # naiveproxy
