@@ -115,7 +115,7 @@ ask_settings() {
     echo "  1. www.dell.com"
     echo "  2. shopee.sg"
     echo "  3. aws.amazon.com"
-    echo "  4. www.lovelive-anime.jp"
+    echo "  4. www.tnm.jp"
     echo "  5. www.sjsu.edu"
     echo "  6. 自定义"
     while true; do
@@ -124,7 +124,7 @@ ask_settings() {
             1) SNI="www.dell.com" ;;
             2) SNI="shopee.sg" ;;
             3) SNI="aws.amazon.com" ;;
-            4) SNI="www.lovelive-anime.jp" ;;
+            4) SNI="www.tnm.jp" ;;
             5) SNI="www.sjsu.edu" ;;
             6)
                 read -r -p "请输入 SNI 域名: " SNI
