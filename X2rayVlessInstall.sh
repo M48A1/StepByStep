@@ -112,27 +112,23 @@ ask_settings() {
     [ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || die "端口必须在 1-65535 之间。"
 
     echo "选择 REALITY 伪装目标 SNI："
-    echo "  1. www.dell.com"
-    echo "  2. shopee.sg"
-    echo "  3. aws.amazon.com"
-    echo "  4. www.tnm.jp"
-    echo "  5. www.sjsu.edu"
-    echo "  6. uni-frankfurt.de"
-    echo "  7. 自定义"
+    echo "  1. shopee.sg"
+    echo "  2. www.tnm.jp"
+    echo "  3. www.sjsu.edu"
+    echo "  4. uni-frankfurt.de"
+    echo "  5. 自定义"
     while true; do
-        read -r -p "请选择 1-7: " choice
+        read -r -p "请选择 1-5: " choice
         case "$choice" in
-            1) SNI="www.dell.com" ;;
-            2) SNI="shopee.sg" ;;
-            3) SNI="aws.amazon.com" ;;
-            4) SNI="www.tnm.jp" ;;
-            5) SNI="www.sjsu.edu" ;;
-            6) SNI="uni-frankfurt.de" ;;
-            7)
+            1) SNI="shopee.sg" ;;
+            2) SNI="www.tnm.jp" ;;
+            3) SNI="www.sjsu.edu" ;;
+            4) SNI="uni-frankfurt.de" ;;
+            5)
                 read -r -p "请输入 SNI 域名: " SNI
                 validate_sni "$SNI" || { warn "SNI 格式不正确，请重新选择。"; continue; }
                 ;;
-            *) warn "请输入 1-7。"; continue ;;
+            *) warn "请输入 1-5。"; continue ;;
         esac
         if confirm_sni_cdn "$SNI"; then
             break
