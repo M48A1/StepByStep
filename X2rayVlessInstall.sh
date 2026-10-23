@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
-VERSION="2.4.14"
-BUILD_DATE="2026-09-22"
+VERSION="2.4.15"
+BUILD_DATE="2026-10-23"
 
 set -Eeuo pipefail
 
@@ -306,6 +306,29 @@ get_public_ip() {
     [ -n "$SERVER_IP" ] || die "服务器 IP 不能为空。"
 }
 
+# JSON string quoting is also valid YAML and protects names containing :/#/quotes.
+print_clash_proxy() {
+    local name=$1 server=$2 port=$3 uuid=$4 flow=$5 sni=$6 public_key=$7 short_id=$8
+    jq -nr --arg name "$name" --arg server "$server" --arg port "$port" \
+        --arg uuid "$uuid" --arg flow "$flow" --arg sni "$sni" \
+        --arg public_key "$public_key" --arg short_id "$short_id" \
+        --arg fingerprint "$FINGERPRINT" '
+        "  - name: " + ($name | tojson),
+        "    type: vless",
+        "    server: " + ($server | tojson),
+        "    port: " + ($port | tonumber | tostring),
+        "    uuid: " + ($uuid | tojson),
+        "    network: tcp",
+        "    udp: true",
+        "    tls: true",
+        "    flow: " + ($flow | tojson),
+        "    servername: " + ($sni | tojson),
+        "    client-fingerprint: " + ($fingerprint | tojson),
+        "    reality-opts:",
+        "      public-key: " + ($public_key | tojson),
+        "      short-id: " + ($short_id | tojson)'
+}
+
 print_result() {
     local encoded_name link
     encoded_name=$(printf '%s' "$NODE_NAME" | jq -sRr @uri)
@@ -328,6 +351,9 @@ SpiderX: ${SPIDER_X}
 
 VLESS 链接:
 ${link}
+
+Clash/Mihomo YAML（复制到已有 proxies: 下，不要重复添加 proxies:）:
+$(print_clash_proxy "$NODE_NAME" "$SERVER_IP" "$PORT" "$UUID" "$FLOW" "$SNI" "$PUBLIC_KEY" "$SHORT_ID")
 EOF
     chmod 600 "$XRAY_INFO"
 
@@ -347,6 +373,10 @@ EOF
     echo -e "Short ID      : ${CYAN}${SHORT_ID}${NC}"
     echo -e "Fingerprint   : ${CYAN}${FINGERPRINT}${NC}"
     echo -e "SpiderX       : ${CYAN}${SPIDER_X}${NC}"
+    echo
+    echo "============== Clash/Mihomo YAML =============="
+    echo "复制以下内容到配置文件已有的 proxies: 下："
+    print_clash_proxy "$NODE_NAME" "$SERVER_IP" "$PORT" "$UUID" "$FLOW" "$SNI" "$PUBLIC_KEY" "$SHORT_ID"
     echo
     echo -e "${BLUE}============== 导入链接 ==============${NC}"
     echo -e "${CYAN}${link}${NC}"
@@ -662,6 +692,29 @@ repair_reality_config() {
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
 }
 
+# JSON string quoting is also valid YAML and protects names containing :/#/quotes.
+print_clash_proxy() {
+    local name=$1 server=$2 port=$3 uuid=$4 flow=$5 sni=$6 public_key=$7 short_id=$8
+    jq -nr --arg name "$name" --arg server "$server" --arg port "$port" \
+        --arg uuid "$uuid" --arg flow "$flow" --arg sni "$sni" \
+        --arg public_key "$public_key" --arg short_id "$short_id" \
+        --arg fingerprint "$FINGERPRINT" '
+        "  - name: " + ($name | tojson),
+        "    type: vless",
+        "    server: " + ($server | tojson),
+        "    port: " + ($port | tonumber | tostring),
+        "    uuid: " + ($uuid | tojson),
+        "    network: tcp",
+        "    udp: true",
+        "    tls: true",
+        "    flow: " + ($flow | tojson),
+        "    servername: " + ($sni | tojson),
+        "    client-fingerprint: " + ($fingerprint | tojson),
+        "    reality-opts:",
+        "      public-key: " + ($public_key | tojson),
+        "      short-id: " + ($short_id | tojson)'
+}
+
 regenerate_client_info_from_config() {
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
@@ -716,6 +769,9 @@ SpiderX: ${SPIDER_X}
 
 VLESS 链接:
 ${link}
+
+Clash/Mihomo YAML（复制到已有 proxies: 下，不要重复添加 proxies:）:
+$(print_clash_proxy "$node_name" "$server_ip" "$port" "$uuid" "$flow" "$sni" "$public_key" "$short_id")
 EOF
     chmod 600 "$XRAY_INFO"
 
@@ -726,8 +782,8 @@ EOF
 }
 
 show_info() {
-    if [ ! -f "$XRAY_INFO" ]; then
-        warn "未找到节点信息文件，尝试从当前配置重新生成。"
+    if [ ! -f "$XRAY_INFO" ] || ! grep -q '^Clash/Mihomo YAML' "$XRAY_INFO"; then
+        warn "正在从当前配置生成节点信息和 Clash/Mihomo YAML。"
         regenerate_client_info_from_config
     fi
 
@@ -1278,6 +1334,29 @@ repair_reality_config() {
     ok "Xray 已重启，客户端信息和二维码已重新生成。"
 }
 
+# JSON string quoting is also valid YAML and protects names containing :/#/quotes.
+print_clash_proxy() {
+    local name=$1 server=$2 port=$3 uuid=$4 flow=$5 sni=$6 public_key=$7 short_id=$8
+    jq -nr --arg name "$name" --arg server "$server" --arg port "$port" \
+        --arg uuid "$uuid" --arg flow "$flow" --arg sni "$sni" \
+        --arg public_key "$public_key" --arg short_id "$short_id" \
+        --arg fingerprint "$FINGERPRINT" '
+        "  - name: " + ($name | tojson),
+        "    type: vless",
+        "    server: " + ($server | tojson),
+        "    port: " + ($port | tonumber | tostring),
+        "    uuid: " + ($uuid | tojson),
+        "    network: tcp",
+        "    udp: true",
+        "    tls: true",
+        "    flow: " + ($flow | tojson),
+        "    servername: " + ($sni | tojson),
+        "    client-fingerprint: " + ($fingerprint | tojson),
+        "    reality-opts:",
+        "      public-key: " + ($public_key | tojson),
+        "      short-id: " + ($short_id | tojson)'
+}
+
 regenerate_client_info_from_config() {
     [ -f "$XRAY_CONFIG" ] || die "未找到配置文件：$XRAY_CONFIG"
 
@@ -1332,6 +1411,9 @@ SpiderX: ${SPIDER_X}
 
 VLESS 链接:
 ${link}
+
+Clash/Mihomo YAML（复制到已有 proxies: 下，不要重复添加 proxies:）:
+$(print_clash_proxy "$node_name" "$server_ip" "$port" "$uuid" "$flow" "$sni" "$public_key" "$short_id")
 EOF
     chmod 600 "$XRAY_INFO"
 
@@ -1342,8 +1424,8 @@ EOF
 }
 
 show_info() {
-    if [ ! -f "$XRAY_INFO" ]; then
-        warn "未找到节点信息文件，尝试从当前配置重新生成。"
+    if [ ! -f "$XRAY_INFO" ] || ! grep -q '^Clash/Mihomo YAML' "$XRAY_INFO"; then
+        warn "正在从当前配置生成节点信息和 Clash/Mihomo YAML。"
         regenerate_client_info_from_config
     fi
 
