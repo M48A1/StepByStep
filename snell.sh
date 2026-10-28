@@ -671,13 +671,48 @@ show_config() {
   cat "$UNIT"
 }
 
+show_menu_summary() {
+  local state enabled version listen host network
+  printf '\n========================================\nSnell 管理菜单\n========================================\n'
+  if ! is_installed; then
+    printf '安装状态：未安装或安装不完整\n'
+    return
+  fi
+  version=$(cat "$META")
+  state=$(systemctl is-active "$SERVICE" 2>/dev/null) || :
+  enabled=$(systemctl is-enabled "$SERVICE" 2>/dev/null) || :
+  case "$state" in
+    active) state='运行中' ;;
+    inactive) state='已停止' ;;
+    failed) state='启动失败' ;;
+    *) state=${state:-未知} ;;
+  esac
+  case "$enabled" in enabled) enabled='已启用' ;; disabled) enabled='未启用' ;; esac
+  listen=$(config_value listen)
+  host=YOUR_SERVER_IP
+  network='未记录（查看完整配置）'
+  if [[ -s $CLIENT_CONF ]]; then
+    host=$(config_value host "$CLIENT_CONF")
+    network=$(config_value network "$CLIENT_CONF")
+    case "$network" in
+      ipv4) network='仅 IPv4' ;;
+      ipv6) network='仅 IPv6' ;;
+      dual) network='IPv4 + IPv6 双栈' ;;
+      '') network='未记录（查看完整配置）' ;;
+    esac
+  fi
+  printf '当前版本：%s\n运行状态：%s\n开机启动：%s\n监听地址：%s\n节点地址：%s\n网络模式：%s\n' \
+    "$version" "$state" "${enabled:-未知}" "$listen" "${host:-YOUR_SERVER_IP}" "$network"
+}
+
 select_action() {
   if [[ -t 0 ]]; then
     exec 8<&0
   elif ! { exec 8</dev/tty; } 2>/dev/null; then
     die '没有交互终端，请指定 snell info、snell config 或 snell reinstall 等命令。'
   fi
-  printf '\nSnell 管理菜单\n  1) 查看现有配置和节点\n  2) 查看服务状态\n  3) 重装 / 重新选择网络与其他参数\n  4) 启动\n  5) 停止\n  6) 重启\n  7) 查看日志\n  0) 退出\n' >&2
+  show_menu_summary >&2
+  printf '\n  1) 查看完整配置\n  2) 查看服务状态详情\n  3) 重装 / 重新选择网络与其他参数\n  4) 启动\n  5) 停止\n  6) 重启\n  7) 查看日志\n  8) 查看 Surge 节点（复制到客户端）\n  0) 退出\n' >&2
   local choice
   while true; do
     printf '请选择：' >&2
@@ -690,8 +725,9 @@ select_action() {
       5) ACTION=stop; break ;;
       6) ACTION=restart; break ;;
       7) ACTION=logs; break ;;
+      8) ACTION=info; break ;;
       0) ACTION=quit; break ;;
-      *) printf '请输入 0–7。\n' >&2 ;;
+      *) printf '请输入 0–8。\n' >&2 ;;
     esac
   done
   exec 8<&-
