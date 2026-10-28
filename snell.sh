@@ -5,6 +5,9 @@
 # 用法：sudo bash snell.sh
 # 运行后先选择版本，再输入端口；也可用环境变量预先指定。
 # 自动安装：sudo env SNELL_VERSION=5.0.1 SNELL_PORT=23456 bash snell.sh
+# 将完整入口定义为函数，流式运行时也能用 declare -f 保存管理命令。
+# Bash 会先读取完整函数体，再执行入口，避免重新读取已消费的 /dev/fd 管道。
+snell_entry() {
 set -Eeuo pipefail
 umask 077
 
@@ -18,8 +21,8 @@ readonly TFO_SYSCTL=/etc/sysctl.d/99-snell-tfo.conf
 readonly SERVICE=snell-server.service
 readonly MANAGER=/usr/local/bin/snell
 readonly BACKUP_ROOT=/var/backups/snell
-readonly SCRIPT_SOURCE=${BASH_SOURCE[0]}
-readonly CHANGE_PATHS=("$BIN" "$CONF_DIR" "$UNIT" "$MANAGER" "$TFO_SYSCTL")
+CHANGE_PATHS=("$BIN" "$CONF_DIR" "$UNIT" "$MANAGER" "$TFO_SYSCTL")
+readonly CHANGE_PATHS
 WORK=''
 INSTALLING=0
 TFO_CHANGED=0
@@ -419,7 +422,8 @@ show_info() {
   if [[ $host == *:* && $host != \[*\] ]]; then host="[$host]"; fi
   printf '\nSnell %s\n监听地址：%s\n配置文件：%s\n\n' "$version" "$listen" "$CONF"
   printf '网络模式：%s\n' "${network:-legacy（请查看原始配置）}"
-  log 'Surge 节点（包含密钥，请妥善保管）：'
+  log '以下为 Surge [Proxy] 配置片段（包含密钥，请妥善保管）：'
+  printf '\n[Proxy]\n'
   printf 'Snell = snell, %s, %s, psk=%s, version=%s' "$host" "$port" "$psk" "$protocol"
   printf ', tfo=%s, reuse=%s' "${tfo:-false}" "${reuse:-false}"
   case "$network" in
@@ -431,6 +435,8 @@ show_info() {
     printf ', mode=%s' "${mode:-default}"
   fi
   printf '\n\n'
+  log '已有 [Proxy] 区域时，只复制上面的 Snell = ... 这一整行到该区域，无需重复添加 [Proxy]。'
+  log '这是一段节点配置；节点名称 Snell 可自行修改。以后运行 snell info 可再次查看。'
   [[ $host != YOUR_SERVER_IP ]] || log '请将 YOUR_SERVER_IP 替换成服务器公网 IP 或域名。'
   log "请在云安全组和主机防火墙放行 ${port}/tcp。"
   printf '  UFW:       ufw allow %s/tcp\n' "$port"
@@ -449,10 +455,26 @@ is_installed() {
   [[ -s $META && -s $CONF && -x $BIN && -f $UNIT ]]
 }
 
-check_manager_source() {
+write_manager() {
+  {
+    printf '#!/usr/bin/env bash\n# snell-manager-managed\n'
+    declare -f snell_entry || return 1
+    printf '\nsnell_entry "$@"\n'
+  } > "$1"
+}
+
+install_manager() {
+  local staging
+  staging=$(mktemp "${MANAGER}.tmp.XXXXXX")
+  if write_manager "$staging" && chmod 755 "$staging" && mv -f -- "$staging" "$MANAGER"; then
+    return 0
+  fi
+  rm -f -- "$staging"
+  return 1
+}
+
+check_manager_target() {
   local marker
-  [[ -f $SCRIPT_SOURCE && -r $SCRIPT_SOURCE ]] ||
-    die '请先把脚本保存为 snell.sh 再运行，以便安装 snell 管理命令。'
   if [[ -e $MANAGER || -L $MANAGER ]]; then
     [[ ! -L $MANAGER && -f $MANAGER ]] &&
       marker=$(head -n 2 "$MANAGER") && [[ $marker == *'# snell-manager-managed'* ]] ||
@@ -462,9 +484,9 @@ check_manager_source() {
 
 install_snell() {
   local reinstall=${1:-false} path
-  check_manager_source
+  check_manager_target
   if is_installed && [[ $reinstall != true ]]; then
-    atomic_install "$SCRIPT_SOURCE" "$MANAGER" 755
+    install_manager
     log '保留现有安装，已安装/更新 snell 管理命令。修改参数请使用 snell reinstall。'
     show_info
     return
@@ -504,7 +526,7 @@ install_snell() {
   "$WORK/snell-server" --help > "$WORK/help.txt" 2>&1 ||
     die '二进制无法运行，请检查 CPU 架构或升级系统 glibc。'
   write_server_config > "$WORK/snell-server.conf"
-  install -m 755 "$SCRIPT_SOURCE" "$WORK/manager"
+  write_manager "$WORK/manager"
   cat > "$WORK/snell-server.service" <<EOF
 [Unit]
 Description=Snell Proxy Server
@@ -608,8 +630,17 @@ main() {
   esac
   if [[ $EUID -ne 0 && $(uname -s) == Linux ]]; then
     command -v sudo >/dev/null || die '请以 root 运行。'
-    [[ -f $SCRIPT_SOURCE ]] || die '请将脚本保存到文件后用 sudo bash snell.sh 运行。'
-    exec sudo bash "$SCRIPT_SOURCE" "$@"
+    local elevated_dir elevated_rc
+    elevated_dir=$(mktemp -d)
+    # sudo 通常关闭 /dev/fd 描述符，先将完整入口保存到私有临时目录。
+    trap 'rm -rf -- "$elevated_dir"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    write_manager "$elevated_dir/snell.sh"
+    if sudo bash "$elevated_dir/snell.sh" "$@"; then elevated_rc=0; else elevated_rc=$?; fi
+    rm -rf -- "$elevated_dir"
+    trap - EXIT INT TERM
+    return "$elevated_rc"
   fi
   check_system
   command -v flock >/dev/null || die '缺少 flock，请安装 util-linux。'
@@ -619,8 +650,8 @@ main() {
     if is_installed; then ACTION=menu; else ACTION=install; fi
   fi
   if [[ $ACTION == menu ]]; then
-    check_manager_source
-    atomic_install "$SCRIPT_SOURCE" "$MANAGER" 755
+    check_manager_target
+    install_manager
     select_action
   fi
   case "$ACTION" in
@@ -635,6 +666,9 @@ main() {
   esac
 }
 
-if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+if [[ -z ${BASH_SOURCE[0]:-} || ${BASH_SOURCE[0]} == "$0" ]]; then
   main "$@"
 fi
+}
+
+snell_entry "$@"
