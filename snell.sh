@@ -49,7 +49,7 @@ reinstall 重新选择参数并重装，备份保存在 /var/backups/snell，失
   SNELL_VERSION  5.0.1 或 6.0.0（官方文档仍标为测试版）
   SNELL_PORT     监听端口，1024–65535
   SNELL_PSK      16–128 位字母/数字/_/-，默认生成 32 位随机密钥
-  SNELL_HOST     输出节点使用的公网 IPv4/IPv6 或域名，默认显示占位符
+  SNELL_HOST     输出节点使用的公网 IPv4/IPv6 或域名，默认自动检测公网 IP
   SNELL_TFO      true/false，默认 false；开启时持久化内核 TFO 支持
   SNELL_REUSE    true/false，Surge 连接复用，默认 false
   SNELL_MODE     v6 使用 default/unshaped，默认 default
@@ -93,6 +93,90 @@ valid_host() {
      $1 =~ ^\[[0-9a-fA-F:]+\]$ ]]
 }
 
+valid_detected_ip() {
+  local value=$1 family=$2 part count=0 rest first second
+  local parts=()
+  if [[ $family == 4 ]]; then
+    [[ $value =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    IFS=. read -r -a parts <<< "$value"
+    for part in "${parts[@]}"; do (( 10#$part <= 255 )) || return 1; done
+    first=$((10#${parts[0]})); second=$((10#${parts[1]}))
+    (( first > 0 && first < 224 && first != 10 && first != 127 )) || return 1
+    (( !(first == 169 && second == 254) && !(first == 172 && second >= 16 && second <= 31) &&
+       !(first == 192 && second == 168) && !(first == 100 && second >= 64 && second <= 127) ))
+  else
+    # 只接收全球单播 IPv6，拒绝 HTML、内网地址及格式不完整的响应。
+    [[ $value =~ ^[23][0-9a-fA-F]{3}:[0-9a-fA-F:]+$ && $value != *:::* ]] || return 1
+    [[ $value != *: || $value == *:: ]] || return 1
+    rest=${value#*::}
+    [[ $rest != *::* ]] || return 1
+    IFS=: read -r -a parts <<< "$value"
+    for part in "${parts[@]}"; do
+      [[ -n $part ]] || continue
+      (( ${#part} <= 4 )) || return 1
+      count=$((count + 1))
+    done
+    if [[ $value == *::* ]]; then
+      (( count < 8 ))
+    else
+      [[ $value != *: ]] && (( count == 8 ))
+    fi
+  fi
+}
+
+detect_public_ip() {
+  command -v curl >/dev/null || return 1
+  local family url result
+  local families=()
+  case "${SNELL_NETWORK:-ipv4}" in
+    ipv4) families=(4) ;;
+    ipv6) families=(6) ;;
+    dual) families=(4 6) ;;
+    *) return 1 ;;
+  esac
+  for family in "${families[@]}"; do
+    for url in https://api64.ipify.org https://ifconfig.co/ip; do
+      if result=$(curl -q -fsS "-$family" --noproxy '*' --proto '=https' \
+          --connect-timeout 2 --max-time 4 --max-filesize 128 "$url" 2>/dev/null); then
+        result=${result//$'\r'/}
+        if valid_detected_ip "$result" "$family"; then
+          printf '%s\n' "$result"
+          return 0
+        fi
+      fi
+    done
+  done
+  return 1
+}
+
+choose_host() {
+  local interactive=${1:-false} detected='' choice
+  [[ -z ${SNELL_HOST:-} ]] || return 0
+  log '正在自动检测服务器公网 IP…' >&2
+  detected=$(detect_public_ip) || detected=''
+  if [[ -n $detected ]]; then
+    log "检测到公网 IP：${detected}" >&2
+  else
+    log '未能检测到公网 IP，可手动填写或稍后替换节点中的 YOUR_SERVER_IP。' >&2
+  fi
+  if [[ $interactive == true ]]; then
+    while true; do
+      if [[ -n $detected ]]; then
+        printf '服务器 IP 或域名 [回车使用 %s，可输入其他地址覆盖]：' "$detected" >&2
+      else
+        printf '请输入服务器公网 IP 或域名 [回车稍后手动填写]：' >&2
+      fi
+      IFS= read -r -u 8 choice || die '输入已结束，安装已取消。'
+      if [[ -z $choice ]] || valid_host "$choice"; then
+        SNELL_HOST=${choice:-${detected:-YOUR_SERVER_IP}}
+        return
+      fi
+      printf '请输入 IP 或域名，不要包含协议或端口。\n' >&2
+    done
+  fi
+  SNELL_HOST=${detected:-YOUR_SERVER_IP}
+}
+
 ask_bool() {
   local name=$1 prompt=$2 choice
   [[ -z ${!name} ]] || return 0
@@ -112,7 +196,10 @@ collect_options() {
   if [[ -t 0 ]]; then
     exec 8<&0
   elif ! { exec 8</dev/tty; } 2>/dev/null; then
-    [[ -n ${SNELL_VERSION:-} && -n ${SNELL_PORT:-} ]] && return 0
+    if [[ -n ${SNELL_VERSION:-} && -n ${SNELL_PORT:-} ]]; then
+      choose_host false
+      return 0
+    fi
     die '无法读取交互终端，请同时指定 SNELL_VERSION 和 SNELL_PORT。'
   fi
   local choice
@@ -178,17 +265,7 @@ collect_options() {
       printf 'PSK 必须为 16–128 位字母、数字、下划线或连字符。\n' >&2
     done
   fi
-  if [[ -z ${SNELL_HOST:-} ]]; then
-    while true; do
-      printf '请输入服务器公网 IP（支持 IPv6）或域名 [回车稍后手动填写]：' >&2
-      IFS= read -r -u 8 choice || die '输入已结束，安装已取消。'
-      if [[ -z $choice ]] || valid_host "$choice"; then
-        SNELL_HOST=${choice:-YOUR_SERVER_IP}
-        break
-      fi
-      printf '请输入 IP 或域名，不要包含协议或端口。\n' >&2
-    done
-  fi
+  choose_host true
   if [[ $SNELL_VERSION == 6.0.0 && -z ${SNELL_MODE:-} ]]; then
     printf '\nv6 传输模式：\n  1) default：加密并进行流量整形\n  2) unshaped：保留加密，关闭流量整形\n' >&2
     while true; do
@@ -504,9 +581,9 @@ install_snell() {
   for path in "${CHANGE_PATHS[@]}"; do
     [[ ! -L $path ]] || die "不支持符号链接安装路径：$path"
   done
+  install_dependencies
   collect_options
   validate_options
-  install_dependencies
   prepare_network
   [[ -n $PSK ]] || PSK=$(openssl rand -hex 16)
   WORK=$(mktemp -d)
